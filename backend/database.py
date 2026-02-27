@@ -32,7 +32,8 @@ def init_db():
             password_hash TEXT NOT NULL,
             is_admin INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            active INTEGER DEFAULT 1
+            active INTEGER DEFAULT 1,
+            history_access INTEGER DEFAULT 0
         )
     ''')
     
@@ -53,6 +54,16 @@ def init_db():
     conn.commit()
     conn.close()
     print(f"Database initialized at {DB_PATH}")
+
+    # Ensure history_access column exists for upgrades from older schemas
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(users)")
+    columns = {row["name"] for row in cursor.fetchall()}
+    if "history_access" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN history_access INTEGER DEFAULT 0")
+        conn.commit()
+    conn.close()
 
 def hash_password(password: str) -> str:
     """Hash a password using bcrypt"""
@@ -86,7 +97,7 @@ def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
         return user
     return None
 
-def create_user(username: str, password: str, is_admin: bool = False) -> bool:
+def create_user(username: str, password: str, is_admin: bool = False, history_access: bool = False) -> bool:
     """Create a new user"""
     try:
         conn = get_db_connection()
@@ -94,8 +105,8 @@ def create_user(username: str, password: str, is_admin: bool = False) -> bool:
         password_hash = hash_password(password)
         
         cursor.execute(
-            "INSERT INTO users (username, password_hash, is_admin, active) VALUES (?, ?, ?, 1)",
-            (username, password_hash, 1 if is_admin else 0)
+            "INSERT INTO users (username, password_hash, is_admin, active, history_access) VALUES (?, ?, ?, 1, ?)",
+            (username, password_hash, 1 if is_admin else 0, 1 if history_access else 0)
         )
         conn.commit()
         conn.close()
@@ -108,10 +119,12 @@ def get_all_users() -> List[Dict[str, Any]]:
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    cursor.execute("SELECT id, username, is_admin, created_at FROM users WHERE active = 1")
+    cursor.execute("SELECT id, username, is_admin, created_at, history_access FROM users WHERE active = 1")
     users = [dict(row) for row in cursor.fetchall()]
     conn.close()
     
+    for user in users:
+        user["history_access"] = bool(user.get("history_access"))
     return users
 
 def delete_user(username: str) -> bool:

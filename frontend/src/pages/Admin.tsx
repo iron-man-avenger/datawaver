@@ -5,9 +5,12 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
+import { Badge } from '../components/ui/badge';
 import { Alert, AlertDescription } from '../components/ui/alert';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
-import { Trash2, Edit2 } from 'lucide-react';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogHeader, AlertDialogTitle } from '../components/ui/alert-dialog';
+import { Trash2, Edit2, Plus, Copy, Check } from 'lucide-react';
 import {
   Select,
   SelectContent,
@@ -22,6 +25,7 @@ interface User {
   created_at: string;
   is_active: boolean;
   plain_password?: string;
+  history_access: boolean;
 }
 
 export const AdminPage: React.FC = () => {
@@ -30,17 +34,24 @@ export const AdminPage: React.FC = () => {
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [newRole, setNewRole] = useState('user');
+  const [newHistoryAccess, setNewHistoryAccess] = useState(false);
   const [users, setUsers] = useState<User[]>([]);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [userToDelete, setUserToDelete] = useState<string | null>(null);
   const [editingUser, setEditingUser] = useState<string | null>(null);
   const [editUsername, setEditUsername] = useState('');
   const [editPassword, setEditPassword] = useState('');
   const [editRole, setEditRole] = useState('user');
+  const [editHistoryAccess, setEditHistoryAccess] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [lastCreatedPassword, setLastCreatedPassword] = useState('');
   const [showCreatedPassword, setShowCreatedPassword] = useState(false);
+  const [passwordCopied, setPasswordCopied] = useState(false);
 
   // Check if user is admin
   useEffect(() => {
@@ -91,6 +102,7 @@ export const AdminPage: React.FC = () => {
           username: newUsername,
           password: newPassword,
           role: newRole,
+          history_access: newHistoryAccess,
         }),
       });
 
@@ -105,7 +117,9 @@ export const AdminPage: React.FC = () => {
       setNewUsername('');
       setNewPassword('');
       setNewRole('user');
+      setNewHistoryAccess(false);
       loadUsers();
+      // Keep modal open to show success, user will close it
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create user');
     } finally {
@@ -113,17 +127,13 @@ export const AdminPage: React.FC = () => {
     }
   };
 
-  const handleDeleteUser = async (userToDelete: string) => {
-    if (!confirm(`Are you sure you want to delete user "${userToDelete}"?`)) {
-      return;
-    }
-
+  const handleDeleteUser = async (userToDeleteConfirm: string) => {
     setError('');
     setSuccess('');
     setLoading(true);
 
     try {
-      const response = await fetch(`http://localhost:8015/datawaverapi/auth/users/${userToDelete}`, {
+      const response = await fetch(`http://localhost:8015/datawaverapi/auth/users/${userToDeleteConfirm}`, {
         method: 'DELETE',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -135,7 +145,9 @@ export const AdminPage: React.FC = () => {
         throw new Error(data.detail || 'Failed to delete user');
       }
 
-      setSuccess(`User ${userToDelete} deleted successfully`);
+      setSuccess(`User ${userToDeleteConfirm} deleted successfully`);
+      setShowDeleteConfirm(false);
+      setUserToDelete(null);
       loadUsers();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete user');
@@ -149,7 +161,9 @@ export const AdminPage: React.FC = () => {
     setEditUsername(user.username);
     setEditPassword('');
     setEditRole(user.role);
+    setEditHistoryAccess(user.history_access);
     setShowPassword(false);
+    setShowEditModal(true);
   };
 
   const handleSaveEdit = async (userToEdit: string) => {
@@ -168,6 +182,7 @@ export const AdminPage: React.FC = () => {
           new_username: editUsername !== userToEdit ? editUsername : undefined,
           password: editPassword || undefined,
           role: editRole,
+          history_access: editHistoryAccess,
         }),
       });
 
@@ -177,6 +192,7 @@ export const AdminPage: React.FC = () => {
       }
 
       setSuccess(`User ${userToEdit} updated successfully`);
+      setShowEditModal(false);
       setEditingUser(null);
       setEditUsername('');
       setEditPassword('');
@@ -188,250 +204,421 @@ export const AdminPage: React.FC = () => {
     }
   };
 
+  // Handle password copy
+  const handleCopyPassword = () => {
+    navigator.clipboard.writeText(lastCreatedPassword);
+    setPasswordCopied(true);
+    setTimeout(() => setPasswordCopied(false), 2000);
+  };
+
   return (
-    <div className="min-h-screen p-8" style={{ backgroundColor: '#0F172A' }}>
-      <div className="max-w-6xl mx-auto">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-white">Admin Panel</h1>
-          <p className="text-slate-400 mt-2">Logged in as: <strong>{username}</strong> ({role})</p>
+    <div className="min-h-screen bg-zinc-950">
+      {/* Header Section */}
+      <div className="border-b border-zinc-800 bg-zinc-900/40 backdrop-blur-xl">
+        <div className="max-w-7xl mx-auto px-6 py-8">
+          <div className="flex items-center justify-between gap-6">
+            <div className="flex-1">
+              <h1 className="text-3xl font-bold text-white tracking-tight">User Management</h1>
+              <p className="text-zinc-400 text-sm mt-2">
+                Manage system users and permissions • Logged in as <span className="text-zinc-300 font-medium">{username}</span>
+              </p>
+            </div>
+            <Button
+              onClick={() => {
+                setError('');
+                setSuccess('');
+                setNewUsername('');
+                setNewPassword('');
+                setNewRole('user');
+                setNewHistoryAccess(false);
+                setShowCreatedPassword(false);
+                setShowCreateModal(true);
+              }}
+              className="bg-blue-600 hover:bg-blue-700 text-white gap-2 px-6 h-10 rounded-lg"
+            >
+              <Plus size={18} />
+              Create User
+            </Button>
+          </div>
         </div>
+      </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          {/* Create User Form */}
-          <Card className="bg-slate-900 border-slate-800">
-            <CardHeader>
-              <CardTitle className="text-white">Create New User</CardTitle>
-              <CardDescription className="text-slate-400">Add a new user to the system</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form onSubmit={handleCreateUser} className="space-y-4">
-                {error && (
-                  <Alert variant="destructive">
-                    <AlertDescription>{error}</AlertDescription>
-                  </Alert>
-                )}
+      {/* Main Content */}
+      <div className="max-w-7xl mx-auto px-6 py-8">
+        {/* Global Alerts */}
+        {error && (
+          <Alert variant="destructive" className="mb-6 bg-red-950/50 border-red-900 rounded-lg">
+            <AlertDescription className="text-red-200">{error}</AlertDescription>
+          </Alert>
+        )}
+        {success && (
+          <Alert className="mb-6 bg-green-950/50 border-green-900 rounded-lg">
+            <AlertDescription className="text-green-200">{success}</AlertDescription>
+          </Alert>
+        )}
 
-                {success && (
-                  <Alert className="bg-green-900 border-green-700">
-                    <AlertDescription className="text-green-200">{success}</AlertDescription>
-                    {showCreatedPassword && (
-                      <div className="mt-2 p-2 bg-green-800 rounded text-sm">
-                        <p className="text-green-100 mb-1">User password:</p>
-                        <div className="flex items-center gap-2">
-                          <code className="flex-1 text-green-200 font-mono break-all">{lastCreatedPassword}</code>
-                          <button
-                            onClick={() => {
-                              navigator.clipboard.writeText(lastCreatedPassword);
-                            }}
-                            className="px-2 py-1 bg-green-700 hover:bg-green-600 rounded text-xs text-white"
-                          >
-                            Copy
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </Alert>
-                )}
-
-                <div className="space-y-2">
-                  <Label htmlFor="username" className="text-white">Username</Label>
-                  <Input
-                    id="username"
-                    type="text"
-                    value={newUsername}
-                    onChange={(e) => setNewUsername(e.target.value)}
-                    placeholder="Enter username"
-                    required
-                    disabled={loading}
-                    className="bg-slate-800 border-slate-700 text-white placeholder-slate-500"
-                  />
+        {/* Users Table Card */}
+        <Card className="bg-zinc-900/80 border-zinc-800 rounded-xl overflow-hidden">
+          <CardHeader className="border-b border-zinc-800 px-6 py-5">
+            <CardTitle className="text-white text-xl">Users</CardTitle>
+            <CardDescription className="text-zinc-400 text-sm">
+              {users.length} {users.length === 1 ? 'user' : 'users'} in the system
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="p-0">
+            {users.length === 0 ? (
+              <div className="flex items-center justify-center h-64 text-zinc-400">
+                <div className="text-center">
+                  <p className="text-lg font-medium mb-2">No users yet</p>
+                  <p className="text-sm text-zinc-500">Create your first user to get started</p>
                 </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="password" className="text-white">Password</Label>
-                  <Input
-                    id="password"
-                    type="password"
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    placeholder="Enter password"
-                    required
-                    disabled={loading}
-                    className="bg-slate-800 border-slate-700 text-white placeholder-slate-500"
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="role" className="text-white">Role</Label>
-                  <Select value={newRole} onValueChange={setNewRole} disabled={loading}>
-                    <SelectTrigger className="bg-slate-800 border-slate-700 text-white">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent className="bg-slate-800 border-slate-700">
-                      <SelectItem value="user">User</SelectItem>
-                      <SelectItem value="admin">Admin</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <Button type="submit" className="w-full bg-blue-600 hover:bg-blue-700" disabled={loading}>
-                  {loading ? 'Creating...' : 'Create User'}
-                </Button>
-              </form>
-            </CardContent>
-          </Card>
-
-          {/* Users List */}
-          <Card className="bg-slate-900 border-slate-800">
-            <CardHeader>
-              <CardTitle className="text-white">Users</CardTitle>
-              <CardDescription className="text-slate-400">All system users</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="overflow-x-auto">
+              </div>
+            ) : (
+              <div className="overflow-hidden">
                 <Table>
                   <TableHeader>
-                    <TableRow className="border-slate-700">
-                      <TableHead className="text-slate-300">Username</TableHead>
-                      <TableHead className="text-slate-300">Password</TableHead>
-                      <TableHead className="text-slate-300">Role</TableHead>
-                      <TableHead className="text-slate-300">Created</TableHead>
-                      <TableHead className="text-slate-300">Active</TableHead>
-                      <TableHead className="text-slate-300">Actions</TableHead>
+                    <TableRow className="border-b border-zinc-800 bg-zinc-800/30 hover:bg-zinc-800/30">
+                      <TableHead className="text-zinc-400 text-xs font-semibold uppercase tracking-wider px-6 py-4">Username</TableHead>
+                      <TableHead className="text-zinc-400 text-xs font-semibold uppercase tracking-wider px-6 py-4">Role</TableHead>
+                      <TableHead className="text-zinc-400 text-xs font-semibold uppercase tracking-wider px-6 py-4">History Access</TableHead>
+                      <TableHead className="text-zinc-400 text-xs font-semibold uppercase tracking-wider px-6 py-4">Status</TableHead>
+                      <TableHead className="text-zinc-400 text-xs font-semibold uppercase tracking-wider px-6 py-4">Created</TableHead>
+                      <TableHead className="text-zinc-400 text-xs font-semibold uppercase tracking-wider px-6 py-4">Actions</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {users.map((user) => (
-                      <React.Fragment key={user.username}>
-                        <TableRow className="border-slate-700">
-                          <TableCell className="font-medium text-white">{user.username}</TableCell>
-                          <TableCell className="text-sm text-slate-400">
-                            {user.plain_password ? (
-                              <div className="flex items-center gap-2">
-                                <code className="text-slate-300 font-mono">{'•'.repeat(8)}</code>
-                                <span className="text-xs text-slate-500">(visible after creation)</span>
-                              </div>
-                            ) : (
-                              <span className="text-slate-500 text-xs">••••••••</span>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            <span className={`px-2 py-1 rounded text-sm ${
-                              user.role === 'admin' 
-                                ? 'bg-red-900 text-red-200' 
-                                : 'bg-blue-900 text-blue-200'
-                            }`}>
-                              {user.role}
+                    {users.map((user, idx) => (
+                      <TableRow 
+                        key={user.username}
+                        className="border-b border-zinc-800/50 hover:bg-zinc-800/40 transition-colors duration-150"
+                      >
+                        <TableCell className="px-6 py-4">
+                          <div>
+                            <p className="font-medium text-white text-sm">{user.username}</p>
+                          </div>
+                        </TableCell>
+                        <TableCell className="px-6 py-4">
+                          <Badge
+                            variant={user.role === 'admin' ? 'secondary' : 'default'}
+                            className="text-xs"
+                          >
+                            {user.role === 'admin' ? '⚙️ Admin' : '👤 User'}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="px-6 py-4">
+                          {user.history_access ? (
+                            <Badge variant="secondary" className="text-xs">
+                              🔍 History
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="text-xs">
+                              🚫 Restricted
+                            </Badge>
+                          )}
+                        </TableCell>
+                        <TableCell className="px-6 py-4">
+                          <div className="flex items-center gap-2">
+                            <div className={`h-2 w-2 rounded-full ${user.is_active ? 'bg-green-500 animate-pulse' : 'bg-zinc-600'}`} />
+                            <span className={`text-xs font-medium ${user.is_active ? 'text-green-400' : 'text-zinc-500'}`}>
+                              {user.is_active ? 'Active' : 'Inactive'}
                             </span>
-                          </TableCell>
-                          <TableCell className="text-sm text-slate-400">
-                            {new Date(user.created_at).toLocaleDateString()}
-                          </TableCell>
-                          <TableCell>
-                            <span className={user.is_active ? 'text-green-400' : 'text-red-400'}>
-                              {user.is_active ? '✓' : '✗'}
-                            </span>
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex gap-2">
-                              <button
-                                onClick={() => handleEditUser(user)}
-                                disabled={loading}
-                                className="p-1 rounded hover:bg-slate-700 transition-colors disabled:opacity-50"
-                                title="Edit user"
-                              >
-                                <Edit2 size={14} className="text-blue-400" />
-                              </button>
-                              <button
-                                onClick={() => handleDeleteUser(user.username)}
-                                disabled={loading}
-                                className="p-1 rounded hover:bg-slate-700 transition-colors disabled:opacity-50"
-                                title="Delete user"
-                              >
-                                <Trash2 size={14} className="text-red-400" />
-                              </button>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-
-                        {/* Edit form */}
-                        {editingUser === user.username && (
-                          <TableRow className="border-slate-700 bg-slate-800/50">
-                            <TableCell colSpan={6}>
-                              <div className="p-4 space-y-3">
-                                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                                  <div className="space-y-2">
-                                    <Label className="text-white text-xs">Username</Label>
-                                    <Input
-                                      type="text"
-                                      value={editUsername}
-                                      onChange={(e) => setEditUsername(e.target.value)}
-                                      placeholder="New username"
-                                      className="bg-slate-700 border-slate-600 text-white placeholder-slate-500 h-8 text-xs"
-                                    />
-                                  </div>
-                                  <div className="space-y-2">
-                                    <Label className="text-white text-xs">New Password (optional)</Label>
-                                    <div className="flex gap-1">
-                                      <Input
-                                        type={showPassword ? "text" : "password"}
-                                        value={editPassword}
-                                        onChange={(e) => setEditPassword(e.target.value)}
-                                        placeholder="Leave blank to keep current"
-                                        className="bg-slate-700 border-slate-600 text-white placeholder-slate-500 h-8 text-xs flex-1"
-                                      />
-                                      <button
-                                        type="button"
-                                        onClick={() => setShowPassword(!showPassword)}
-                                        className="px-2 py-1 bg-slate-600 hover:bg-slate-500 rounded text-xs text-white"
-                                      >
-                                        {showPassword ? '👁️' : '👁️‍🗨️'}
-                                      </button>
-                                    </div>
-                                  </div>
-                                  <div className="space-y-2">
-                                    <Label className="text-white text-xs">Role</Label>
-                                    <Select value={editRole} onValueChange={setEditRole}>
-                                      <SelectTrigger className="bg-slate-700 border-slate-600 text-white h-8 text-xs">
-                                        <SelectValue />
-                                      </SelectTrigger>
-                                      <SelectContent className="bg-slate-700 border-slate-600">
-                                        <SelectItem value="user">User</SelectItem>
-                                        <SelectItem value="admin">Admin</SelectItem>
-                                      </SelectContent>
-                                    </Select>
-                                  </div>
-                                </div>
-                                <div className="flex items-end gap-2">
-                                  <Button
-                                    onClick={() => handleSaveEdit(user.username)}
-                                    disabled={loading}
-                                    className="bg-green-600 hover:bg-green-700 text-white h-8 text-xs"
-                                  >
-                                    Save
-                                  </Button>
-                                  <Button
-                                    onClick={() => setEditingUser(null)}
-                                    disabled={loading}
-                                    variant="outline"
-                                    className="border-slate-600 text-slate-300 h-8 text-xs"
-                                  >
-                                    Cancel
-                                  </Button>
-                                </div>
-                              </div>
-                            </TableCell>
-                          </TableRow>
-                        )}
-                      </React.Fragment>
+                          </div>
+                        </TableCell>
+                        <TableCell className="px-6 py-4">
+                          <span className="text-zinc-400 text-sm">
+                            {new Date(user.created_at).toLocaleDateString('en-US', { 
+                              month: 'short', 
+                              day: 'numeric', 
+                              year: 'numeric' 
+                            })}
+                          </span>
+                        </TableCell>
+                        <TableCell className="px-6 py-4">
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => handleEditUser(user)}
+                              disabled={loading}
+                              className="p-2 rounded-lg hover:bg-zinc-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                              title="Edit user"
+                            >
+                              <Edit2 size={16} className="text-blue-400" />
+                            </button>
+                            <button
+                              onClick={() => {
+                                setUserToDelete(user.username);
+                                setShowDeleteConfirm(true);
+                              }}
+                              disabled={loading}
+                              className="p-2 rounded-lg hover:bg-zinc-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                              title="Delete user"
+                            >
+                              <Trash2 size={16} className="text-red-400" />
+                            </button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
                     ))}
                   </TableBody>
                 </Table>
               </div>
-            </CardContent>
-          </Card>
-        </div>
+            )}
+          </CardContent>
+        </Card>
       </div>
+
+      {/* Create User Modal */}
+      <Dialog open={showCreateModal} onOpenChange={setShowCreateModal}>
+        <DialogContent className="bg-zinc-900 border-zinc-800 rounded-xl max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-white text-xl">Create New User</DialogTitle>
+            <DialogDescription className="text-zinc-400">
+              Add a new user to the system. They can log in with their username and password.
+            </DialogDescription>
+          </DialogHeader>
+
+          <form onSubmit={handleCreateUser} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="newUsername" className="text-zinc-300 font-medium text-sm">Username</Label>
+              <Input
+                id="newUsername"
+                type="text"
+                value={newUsername}
+                onChange={(e) => setNewUsername(e.target.value)}
+                placeholder="e.g., john.doe"
+                required
+                disabled={loading}
+                className="bg-zinc-800 border-zinc-700 text-white placeholder-zinc-500 rounded-lg h-10 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="newPassword" className="text-zinc-300 font-medium text-sm">Password</Label>
+              <Input
+                id="newPassword"
+                type="password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                placeholder="Enter a secure password"
+                required
+                disabled={loading}
+                className="bg-zinc-800 border-zinc-700 text-white placeholder-zinc-500 rounded-lg h-10 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="newRole" className="text-zinc-300 font-medium text-sm">Role</Label>
+              <Select value={newRole} onValueChange={setNewRole} disabled={loading}>
+                <SelectTrigger className="bg-zinc-800 border-zinc-700 text-white rounded-lg h-10 focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-zinc-800 border-zinc-700 rounded-lg">
+                  <SelectItem value="user" className="text-white">User</SelectItem>
+                  <SelectItem value="admin" className="text-white">Admin</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-zinc-300 font-medium text-sm">History Access</Label>
+              <div className="flex items-center gap-3 text-sm text-zinc-200">
+                <input
+                  id="newHistoryAccess"
+                  type="checkbox"
+                  checked={newHistoryAccess}
+                  onChange={(e) => setNewHistoryAccess(e.target.checked)}
+                  disabled={loading}
+                  className="h-4 w-4 rounded border-zinc-600 text-blue-500 focus:ring-blue-500"
+                />
+                <label htmlFor="newHistoryAccess">Can access history even when not admin</label>
+              </div>
+            </div>
+
+            {/* Success State with Password Display */}
+            {showCreatedPassword && success && (
+              <div className="mt-6 p-4 rounded-lg bg-green-950/40 border border-green-900/50">
+                <p className="text-green-300 text-sm font-medium mb-3">User created successfully! ✓</p>
+                <div className="bg-zinc-900 rounded border border-zinc-700 p-3 mb-3">
+                  <p className="text-zinc-400 text-xs mb-2">Initial password:</p>
+                  <div className="flex items-center gap-2">
+                    <code className="flex-1 text-green-300 font-mono text-sm break-all">{lastCreatedPassword}</code>
+                    <button
+                      type="button"
+                      onClick={handleCopyPassword}
+                      className="p-1.5 rounded hover:bg-zinc-800 transition-colors"
+                    >
+                      {passwordCopied ? (
+                        <Check size={16} className="text-green-400" />
+                      ) : (
+                        <Copy size={16} className="text-zinc-400" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {error && (
+              <Alert variant="destructive" className="bg-red-950/50 border-red-900/50 rounded-lg">
+                <AlertDescription className="text-red-200 text-sm">{error}</AlertDescription>
+              </Alert>
+            )}
+
+            <div className="flex gap-3 pt-2">
+              <Button
+                type="submit"
+                disabled={loading}
+                className="flex-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg h-10"
+              >
+                {loading ? 'Creating...' : 'Create User'}
+              </Button>
+              <Button
+                type="button"
+                onClick={() => setShowCreateModal(false)}
+                disabled={loading}
+                variant="outline"
+                className="flex-1 border-zinc-700 text-zinc-300 hover:bg-zinc-800 rounded-lg h-10"
+              >
+                Close
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit User Modal */}
+      <Dialog open={showEditModal} onOpenChange={setShowEditModal}>
+        <DialogContent className="bg-zinc-900 border-zinc-800 rounded-xl max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-white text-xl">Edit User</DialogTitle>
+            <DialogDescription className="text-zinc-400">
+              Update user details. Leave password blank to keep current.
+            </DialogDescription>
+          </DialogHeader>
+
+          <form onSubmit={(e) => {
+            e.preventDefault();
+            if (editingUser) {
+              handleSaveEdit(editingUser);
+            }
+          }} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="editUsername" className="text-zinc-300 font-medium text-sm">Username</Label>
+              <Input
+                id="editUsername"
+                type="text"
+                value={editUsername}
+                onChange={(e) => setEditUsername(e.target.value)}
+                placeholder="Username"
+                disabled={loading}
+                className="bg-zinc-800 border-zinc-700 text-white placeholder-zinc-500 rounded-lg h-10 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="editPassword" className="text-zinc-300 font-medium text-sm">New Password (optional)</Label>
+              <div className="flex gap-2">
+                <Input
+                  id="editPassword"
+                  type={showPassword ? "text" : "password"}
+                  value={editPassword}
+                  onChange={(e) => setEditPassword(e.target.value)}
+                  placeholder="Leave blank to keep current"
+                  disabled={loading}
+                  className="bg-zinc-800 border-zinc-700 text-white placeholder-zinc-500 rounded-lg h-10 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 flex-1"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="px-3 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 transition-colors"
+                >
+                  {showPassword ? '👁️' : '👁️‍🗨️'}
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="editRole" className="text-zinc-300 font-medium text-sm">Role</Label>
+              <Select value={editRole} onValueChange={setEditRole} disabled={loading}>
+                <SelectTrigger className="bg-zinc-800 border-zinc-700 text-white rounded-lg h-10 focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-zinc-800 border-zinc-700 rounded-lg">
+                  <SelectItem value="user" className="text-white">User</SelectItem>
+                  <SelectItem value="admin" className="text-white">Admin</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-zinc-300 font-medium text-sm">History Access</Label>
+              <div className="flex items-center gap-3 text-sm text-zinc-200">
+                <input
+                  id="editHistoryAccess"
+                  type="checkbox"
+                  checked={editHistoryAccess}
+                  onChange={(e) => setEditHistoryAccess(e.target.checked)}
+                  disabled={loading}
+                  className="h-4 w-4 rounded border-zinc-600 text-blue-500 focus:ring-blue-500"
+                />
+                <label htmlFor="editHistoryAccess">Can access history even when not admin</label>
+              </div>
+            </div>
+
+            {error && (
+              <Alert variant="destructive" className="bg-red-950/50 border-red-900/50 rounded-lg">
+                <AlertDescription className="text-red-200 text-sm">{error}</AlertDescription>
+              </Alert>
+            )}
+
+            <div className="flex gap-3 pt-2">
+              <Button
+                type="submit"
+                disabled={loading}
+                className="flex-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg h-10"
+              >
+                {loading ? 'Saving...' : 'Save Changes'}
+              </Button>
+              <Button
+                type="button"
+                onClick={() => setShowEditModal(false)}
+                disabled={loading}
+                variant="outline"
+                className="flex-1 border-zinc-700 text-zinc-300 hover:bg-zinc-800 rounded-lg h-10"
+              >
+                Cancel
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Confirmation Dialog */}
+      <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <AlertDialogContent className="bg-zinc-900 border-zinc-800 rounded-xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-white text-lg">Delete User</AlertDialogTitle>
+            <AlertDialogDescription className="text-zinc-400">
+              Are you sure you want to delete <span className="font-semibold text-zinc-300">{userToDelete}</span>? This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="flex gap-3 justify-end pt-2">
+            <AlertDialogCancel className="border-zinc-700 text-zinc-300 hover:bg-zinc-800 rounded-lg">
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (userToDelete) {
+                  handleDeleteUser(userToDelete);
+                }
+              }}
+              disabled={loading}
+              className="bg-red-600 hover:bg-red-700 text-white rounded-lg"
+            >
+              {loading ? 'Deleting...' : 'Delete'}
+            </AlertDialogAction>
+          </div>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 };

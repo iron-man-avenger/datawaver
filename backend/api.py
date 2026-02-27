@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from database import init_db, get_db_connection, log_audit as db_log_audit, log_audit as db_log_audit
 from auth import hash_password, verify_password, create_access_token, decode_token
+from audit_manager import log_change, get_user_history, get_all_history
 
 # Load environment variables from .env
 load_dotenv()
@@ -131,16 +132,19 @@ class LoginResponse(BaseModel):
     token_type: str
     username: str
     role: str
+    history_access: bool
 
 class CreateUserRequest(BaseModel):
     username: str
     password: str
     role: str = "user"
+    history_access: bool = False
 
 class UpdateUserRequest(BaseModel):
     new_username: Optional[str] = None
     password: Optional[str] = None
     role: str = "user"
+    history_access: Optional[bool] = None
 
 class UserResponse(BaseModel):
     username: str
@@ -148,6 +152,7 @@ class UserResponse(BaseModel):
     created_at: str
     is_active: bool
     plain_password: Optional[str] = None
+    history_access: bool
 
 class AuditLogEntry(BaseModel):
     id: int
@@ -305,15 +310,16 @@ def login(request: LoginRequest):
         
         # Determine role based on is_admin flag
         role = "admin" if user['is_admin'] else "user"
-        
-        access_token = create_access_token(request.username, role)
+        has_history_access = bool(user.get('history_access'))
+        access_token = create_access_token(request.username, role, has_history_access)
         logging.info(f"User {request.username} logged in")
         
         return {
             "access_token": access_token,
             "token_type": "bearer",
             "username": request.username,
-            "role": role
+            "role": role,
+            "history_access": has_history_access,
         }
     except HTTPException:
         raise
@@ -333,7 +339,7 @@ def create_user(request: CreateUserRequest, authorization: Optional[str] = Heade
         from database import create_user as db_create_user
         
         is_admin = request.role == "admin"
-        success = db_create_user(request.username, request.password, is_admin)
+        success = db_create_user(request.username, request.password, is_admin, request.history_access)
         
         if not success:
             raise HTTPException(status_code=400, detail="Username already exists")
@@ -345,7 +351,8 @@ def create_user(request: CreateUserRequest, authorization: Optional[str] = Heade
             "role": request.role,
             "created_at": datetime.now().isoformat(),
             "is_active": True,
-            "plain_password": request.password
+            "plain_password": request.password,
+            "history_access": request.history_access,
         }
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="Username already exists")
@@ -373,7 +380,8 @@ def list_users(authorization: Optional[str] = Header(None)):
                 "username": user['username'],
                 "role": role,
                 "created_at": user['created_at'],
-                "is_active": True
+                "is_active": True,
+                "history_access": bool(user.get('history_access')),
             })
         
         return users
@@ -457,12 +465,27 @@ def update_user(username: str, request: UpdateUserRequest, authorization: Option
         )
         db.commit()
         db.close()
+
+        history_access_value = user.get("history_access", 0)
+        history_access_bool = bool(history_access_value)
+        if request.history_access is not None:
+            history_access_value = 1 if request.history_access else 0
+            history_access_bool = bool(history_access_value)
+            db = get_db_connection()
+            cursor = db.cursor()
+            cursor.execute(
+                "UPDATE users SET history_access = ? WHERE username = ?",
+                (history_access_value, new_username)
+            )
+            db.commit()
+            db.close()
         
         logging.info(f"User {username} updated by {current_user['username']}")
         return {
             "username": new_username,
             "role": request.role,
-            "message": "User updated successfully"
+            "message": "User updated successfully",
+            "history_access": history_access_bool,
         }
     except Exception as e:
         logging.error(f"Update user failed: {e}")
@@ -581,7 +604,50 @@ def upsert_data(request: UpsertRequest, authorization: Optional[str] = Header(No
                     return f"'{str(v).replace(chr(39), chr(39) + chr(39))}'"
                 
                 if unique_id in existing_ids:
-                    # UPDATE - log changes
+                    # UPDATE - capture field changes
+                    field_changes = []
+                    
+                    # Compare each field with existing
+                    field_mapping = {
+                        'GLCode': gl_code,
+                        'LineItem': line_item,
+                        'SiteCode': site_code,
+                        'GrandParent': grandparent,
+                        'Parent': parent,
+                        'GrandParentCode': grandparent_code,
+                        'ParentCode': parent_code,
+                        'LineItemCode': line_item_code,
+                        'IsAggregated': is_aggregated,
+                        'AggregatedFormula': agg_formula,
+                        'PercentageFormula': pct_formula,
+                        'ERPSoftware': erp_software,
+                        'SubNLCode': sub_nl_code,
+                        'IsCOGS': is_cogs,
+                        'IsSales': is_sales,
+                        'IsDiscount': is_discount,
+                    }
+                    
+                    # Fetch existing record for comparison
+                    cursor.execute(
+                        f"SELECT * FROM [MLDataWarehouse].[dbo].[PL_Master] WHERE UniqueID = {sql_val(unique_id)}"
+                    )
+                    existing_row = cursor.fetchone()
+                    
+                    existing_values = {}
+                    if existing_row:
+                        columns = [col[0] for col in cursor.description]
+                        existing_values = dict(zip(columns, existing_row))
+
+                    for field_name, new_value in field_mapping.items():
+                        old_value = existing_values.get(field_name)
+                        
+                        if old_value != new_value:
+                            field_changes.append({
+                                "field": field_name,
+                                "old": str(old_value) if old_value is not None else None,
+                                "new": str(new_value) if new_value is not None else None
+                            })
+                    
                     update_query = f"""
                         UPDATE [MLDataWarehouse].[dbo].[PL_Master]
                         SET
@@ -605,11 +671,40 @@ def upsert_data(request: UpsertRequest, authorization: Optional[str] = Header(No
                     """
                     cursor.execute(update_query)
                     
-                    # Log each field change
+                    # Log detailed field changes
+                    if field_changes:
+                        log_change(
+                            username=username,
+                            company_code=company_code,
+                            record_id=unique_id,
+                            change_type="UPDATE",
+                            field_changes=field_changes
+                        )
+                    
+                    # Also log in database for backward compatibility
                     db_log_audit(username, "UPDATE", company_code, unique_id)
                     updated += 1
                 else:
-                    # INSERT
+                    # INSERT - log all fields as new
+                    field_changes = [
+                        {"field": "GLCode", "old": None, "new": str(gl_code)},
+                        {"field": "LineItem", "old": None, "new": str(line_item)},
+                        {"field": "SiteCode", "old": None, "new": str(site_code)},
+                        {"field": "GrandParent", "old": None, "new": str(grandparent) if grandparent else None},
+                        {"field": "Parent", "old": None, "new": str(parent) if parent else None},
+                        {"field": "GrandParentCode", "old": None, "new": str(grandparent_code) if grandparent_code else None},
+                        {"field": "ParentCode", "old": None, "new": str(parent_code) if parent_code else None},
+                        {"field": "LineItemCode", "old": None, "new": str(line_item_code) if line_item_code else None},
+                        {"field": "IsAggregated", "old": None, "new": str(is_aggregated) if is_aggregated is not None else None},
+                        {"field": "AggregatedFormula", "old": None, "new": str(agg_formula) if agg_formula else None},
+                        {"field": "PercentageFormula", "old": None, "new": str(pct_formula) if pct_formula else None},
+                        {"field": "ERPSoftware", "old": None, "new": str(erp_software) if erp_software else None},
+                        {"field": "SubNLCode", "old": None, "new": str(sub_nl_code) if sub_nl_code else None},
+                        {"field": "IsCOGS", "old": None, "new": str(is_cogs)},
+                        {"field": "IsSales", "old": None, "new": str(is_sales)},
+                        {"field": "IsDiscount", "old": None, "new": str(is_discount)},
+                    ]
+                    
                     insert_query = f"""
                         INSERT INTO [MLDataWarehouse].[dbo].[PL_Master]
                         (UniqueID, GLCode, LineItem, CompanyCode, SiteCode, GrandParent, Parent,
@@ -624,7 +719,16 @@ def upsert_data(request: UpsertRequest, authorization: Optional[str] = Header(No
                     """
                     cursor.execute(insert_query)
                     
-                    # Log new record
+                    # Log detailed field changes
+                    log_change(
+                        username=username,
+                        company_code=company_code,
+                        record_id=unique_id,
+                        change_type="INSERT",
+                        field_changes=field_changes
+                    )
+                    
+                    # Also log in database for backward compatibility
                     db_log_audit(username, "INSERT", company_code, unique_id)
                     inserted += 1
             
@@ -838,6 +942,102 @@ def get_record_history(record_id: str, authorization: Optional[str] = Header(Non
         }
     except Exception as e:
         logging.error(f"Get record history failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
+
+@app.get("/audit/user-history")
+def get_current_user_history(
+    authorization: Optional[str] = Header(None),
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    company_code: Optional[str] = None,
+    record_id: Optional[str] = None
+):
+    """Get history for the currently logged-in user from local audit logs"""
+    current_user = get_current_user(authorization)
+    username = current_user['username']
+    
+    try:
+        # Get user history from local JSON files
+        history = get_user_history(
+            username=username,
+            start_date=start_date,
+            end_date=end_date,
+            company_code=company_code,
+            record_id=record_id
+        )
+        
+        # Format for frontend
+        formatted = []
+        for idx, change in enumerate(history, 1):
+            formatted.append({
+                "serial": idx,
+                "id": idx,
+                "timestamp": change.get("timestamp"),
+                "username": username,
+                "company_code": change.get("company_code"),
+                "record_id": change.get("record_id"),
+                "change_type": change.get("change_type"),
+                "field_changes": change.get("field_changes", [])
+            })
+        
+        logging.info(f"User {username} retrieved {len(formatted)} history records")
+        
+        return {
+            "status": "success",
+            "count": len(formatted),
+            "logs": formatted
+        }
+    except Exception as e:
+        logging.error(f"Get user history failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
+
+@app.get("/audit/all-history")
+def get_all_audit_history(
+    authorization: Optional[str] = Header(None),
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    company_code: Optional[str] = None,
+    record_id: Optional[str] = None
+):
+    """Get all history (admin only) from local audit logs"""
+    current_user = get_current_user(authorization)
+    
+    # Admin or history_access check
+    if current_user.get("role") != "admin" and not current_user.get("history_access"):
+        raise HTTPException(status_code=403, detail="Only admins or history-access users can view all history")
+    
+    try:
+        # Get all history from local JSON files
+        history = get_all_history(
+            start_date=start_date,
+            end_date=end_date,
+            company_code=company_code,
+            record_id=record_id
+        )
+        
+        # Format for frontend
+        formatted = []
+        for idx, change in enumerate(history, 1):
+            formatted.append({
+                "serial": idx,
+                "id": idx,
+                "timestamp": change.get("timestamp"),
+                "username": change.get("username"),
+                "company_code": change.get("company_code"),
+                "record_id": change.get("record_id"),
+                "change_type": change.get("change_type"),
+                "field_changes": change.get("field_changes", [])
+            })
+        
+        logging.info(f"Admin {current_user['username']} retrieved all {len(formatted)} history records")
+        
+        return {
+            "status": "success",
+            "count": len(formatted),
+            "logs": formatted
+        }
+    except Exception as e:
+        logging.error(f"Get all history failed: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
 
 if __name__ == "__main__":

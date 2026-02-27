@@ -13,7 +13,10 @@ const queryClient = new QueryClient();
 
 // Protected route component
 const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isReady } = useAuth();
+  if (!isReady) {
+    return null;
+  }
   return isAuthenticated ? <>{children}</> : <Navigate to="/login" />;
 };
 

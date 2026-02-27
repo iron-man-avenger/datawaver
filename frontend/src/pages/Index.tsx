@@ -49,6 +49,7 @@ function PLEditor({
 }) {
   const { rows, deletedIds, addRow, updateCell, deleteRow, duplicateRow, reorderRows, validateRows, resetToOriginal, getStats } =
     useTableEditor({ initialRows, companyCode });
+  const { canViewHistory } = useAuth();
 
   const [isSaving, setIsSaving] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -138,13 +139,15 @@ function PLEditor({
         <div className="flex items-center gap-2 relative">
           <ColumnInfoPanel />
 
-          <button
-            onClick={() => setShowHistory(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold bg-secondary text-secondary-foreground hover:bg-secondary/70 transition-colors border border-border"
-          >
-            <History size={13} />
-            History
-          </button>
+          {canViewHistory && (
+            <button
+              onClick={() => setShowHistory(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold bg-secondary text-secondary-foreground hover:bg-secondary/70 transition-colors border border-border"
+            >
+              <History size={13} />
+              History
+            </button>
+          )}
 
           <button
             onClick={() => addRow(rows.length - 1)}
@@ -254,6 +257,7 @@ function PLEditor({
         isOpen={showHistory}
         onClose={() => setShowHistory(false)}
         companyCode={companyCode}
+        showAllHistory={canViewHistory}
       />
     </div>
   );
