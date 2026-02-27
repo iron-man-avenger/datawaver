@@ -1,0 +1,7 @@
+logging
+pyodbc
+fastapi
+python-dotenv
+streamlit 
+pandas
+uvicorn
