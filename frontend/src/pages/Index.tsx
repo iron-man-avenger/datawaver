@@ -9,9 +9,12 @@ import { EditableTable } from '@/components/EditableTable';
 import { CompanySearch } from '@/components/CompanySearch';
 import { ToastNotification } from '@/components/ToastNotification';
 import { ColumnInfoPanel } from '@/components/ColumnInfoPanel';
+import { HistoryDialog } from '@/components/HistoryDialog';
+import { useAuth } from '@/context/AuthContext';
+import { useNavigate } from 'react-router-dom';
 import {
   Plus, Save, RotateCcw, Download, Database, ChevronRight,
-  Layers, TrendingUp, FileSpreadsheet, AlertTriangle,
+  Layers, TrendingUp, FileSpreadsheet, AlertTriangle, History, LogOut, Settings,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -51,6 +54,7 @@ function PLEditor({
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [showValidation, setShowValidation] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const toastId = useRef(1);
 
   const addToast = (type: Toast['type'], title: string, message?: string) => {
@@ -133,6 +137,14 @@ function PLEditor({
         {/* Right: actions */}
         <div className="flex items-center gap-2 relative">
           <ColumnInfoPanel />
+
+          <button
+            onClick={() => setShowHistory(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold bg-secondary text-secondary-foreground hover:bg-secondary/70 transition-colors border border-border"
+          >
+            <History size={13} />
+            History
+          </button>
 
           <button
             onClick={() => addRow(rows.length - 1)}
@@ -236,6 +248,13 @@ function PLEditor({
           onClose={() => removeToast(t.id)}
         />
       ))}
+
+      {/* History Dialog */}
+      <HistoryDialog
+        isOpen={showHistory}
+        onClose={() => setShowHistory(false)}
+        companyCode={companyCode}
+      />
     </div>
   );
 }
@@ -244,6 +263,8 @@ function PLEditor({
 // Main page
 // ──────────────────────────────────────────────────────────────────────
 const Index = () => {
+  const { username, role, logout } = useAuth();
+  const navigate = useNavigate();
   const [companyCode, setCompanyCode] = useState('');
   const [data, setData] = useState<PLMasterRow[] | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -270,6 +291,11 @@ const Index = () => {
     if (loadedCode) handleSearch(loadedCode);
   }, [loadedCode, handleSearch]);
 
+  const handleLogout = () => {
+    logout();
+    navigate('/login');
+  };
+
   return (
     <div className="flex flex-col min-h-screen bg-background">
       {/* Top header bar */}
@@ -285,7 +311,7 @@ const Index = () => {
         </div>
 
         <div className="flex items-center gap-4">
-          <CompanySearch onSearch={handleSearch} isLoading={isLoading} error={loadError} />
+          <CompanySearch onSearch={handleSearch} isLoading={isLoading} />
 
           {loadedCode && (
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -294,6 +320,32 @@ const Index = () => {
               <span className="px-1.5 py-0.5 rounded bg-success/15 text-success text-[11px] font-medium">connected</span>
             </div>
           )}
+
+          {/* User info and actions */}
+          <div className="flex items-center gap-3 pl-4 border-l border-border">
+            <div className="text-right">
+              <p className="text-xs font-semibold text-foreground">{username}</p>
+              <p className="text-[10px] text-muted-foreground">{role}</p>
+            </div>
+
+            {role === 'admin' && (
+              <button
+                onClick={() => navigate('/admin')}
+                className="p-2 rounded-md hover:bg-secondary transition-colors"
+                title="Admin Panel"
+              >
+                <Settings size={16} className="text-muted-foreground hover:text-foreground" />
+              </button>
+            )}
+
+            <button
+              onClick={handleLogout}
+              className="p-2 rounded-md hover:bg-secondary transition-colors"
+              title="Logout"
+            >
+              <LogOut size={16} className="text-muted-foreground hover:text-foreground" />
+            </button>
+          </div>
         </div>
       </header>
 

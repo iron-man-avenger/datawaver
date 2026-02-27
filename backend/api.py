@@ -1,17 +1,23 @@
 import fastapi
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends, status, Header
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import pyodbc
+import sqlite3
 import os
 from datetime import datetime
 import logging
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
+from database import init_db, get_db_connection, log_audit as db_log_audit, log_audit as db_log_audit
+from auth import hash_password, verify_password, create_access_token, decode_token
 
 # Load environment variables from .env
 load_dotenv()
+
+# Initialize database
+init_db()
 
 # Configure logging
 logging.basicConfig(
@@ -115,6 +121,45 @@ class ColumnInfo(BaseModel):
     data_type: str
     required: bool
 
+# Auth models
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str
+    username: str
+    role: str
+
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+    role: str = "user"
+
+class UpdateUserRequest(BaseModel):
+    new_username: Optional[str] = None
+    password: Optional[str] = None
+    role: str = "user"
+
+class UserResponse(BaseModel):
+    username: str
+    role: str
+    created_at: str
+    is_active: bool
+    plain_password: Optional[str] = None
+
+class AuditLogEntry(BaseModel):
+    id: int
+    company_code: str
+    record_id: str
+    username: str
+    change_type: str
+    field_name: Optional[str]
+    old_value: Optional[str]
+    new_value: Optional[str]
+    timestamp: str
+
 # Helper functions
 def get_connection():
     """Create and return a SQL Server connection"""
@@ -134,6 +179,38 @@ def get_connection():
     except Exception as e:
         logging.error(f"Database connection failed: {e}")
         raise e
+
+def get_current_user(authorization: Optional[str] = None):
+    """Get current user from JWT token"""
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    try:
+        scheme, token = authorization.split()
+        if scheme.lower() != "bearer":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid authentication scheme",
+            )
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authorization header",
+        )
+    
+    payload = decode_token(token)
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    return payload
 
 def safe_val(val):
     """Convert value to SQL-safe format (None for NaN/empty)"""
@@ -170,6 +247,8 @@ def safe_int(val):
         return int(num)
     except (ValueError, TypeError):
         return None
+
+# Use log_audit from database module
 
 # ===== API ENDPOINTS =====
 
@@ -211,6 +290,184 @@ def health_check():
             "error": str(e)
         }
 
+# ===== AUTH ENDPOINTS =====
+
+@app.post("/auth/login", response_model=LoginResponse)
+def login(request: LoginRequest):
+    """User login endpoint"""
+    try:
+        # Use the authenticate_user function from database module
+        from database import authenticate_user
+        
+        user = authenticate_user(request.username, request.password)
+        if user is None:
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        
+        # Determine role based on is_admin flag
+        role = "admin" if user['is_admin'] else "user"
+        
+        access_token = create_access_token(request.username, role)
+        logging.info(f"User {request.username} logged in")
+        
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "username": request.username,
+            "role": role
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Login failed: {e}")
+        raise HTTPException(status_code=500, detail="Login failed")
+
+@app.post("/auth/users", response_model=UserResponse)
+def create_user(request: CreateUserRequest, authorization: Optional[str] = Header(None)):
+    """Create new user (admin only)"""
+    current_user = get_current_user(authorization)
+    
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can create users")
+    
+    try:
+        from database import create_user as db_create_user
+        
+        is_admin = request.role == "admin"
+        success = db_create_user(request.username, request.password, is_admin)
+        
+        if not success:
+            raise HTTPException(status_code=400, detail="Username already exists")
+        
+        logging.info(f"User {request.username} created by admin {current_user['username']}")
+        
+        return {
+            "username": request.username,
+            "role": request.role,
+            "created_at": datetime.now().isoformat(),
+            "is_active": True,
+            "plain_password": request.password
+        }
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=400, detail="Username already exists")
+    except Exception as e:
+        logging.error(f"Create user failed: {e}")
+        raise HTTPException(status_code=500, detail="Create user failed")
+
+@app.get("/auth/users", response_model=List[UserResponse])
+def list_users(authorization: Optional[str] = Header(None)):
+    """Get all users (admin only)"""
+    current_user = get_current_user(authorization)
+    
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can view users")
+    
+    try:
+        from database import get_all_users
+        
+        users_list = get_all_users()
+        
+        users = []
+        for user in users_list:
+            role = "admin" if user['is_admin'] else "user"
+            users.append({
+                "username": user['username'],
+                "role": role,
+                "created_at": user['created_at'],
+                "is_active": True
+            })
+        
+        return users
+    except Exception as e:
+        logging.error(f"List users failed: {e}")
+        raise HTTPException(status_code=500, detail="List users failed")
+
+@app.delete("/auth/users/{username}")
+def delete_user(username: str, authorization: Optional[str] = Header(None)):
+    """Delete a user (admin only)"""
+    current_user = get_current_user(authorization)
+    
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can delete users")
+    
+    if username == current_user["username"]:
+        raise HTTPException(status_code=400, detail="Cannot delete your own account")
+    
+    try:
+        from database import delete_user as db_delete_user
+        
+        success = db_delete_user(username)
+        if not success:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        logging.info(f"User {username} deleted by {current_user['username']}")
+        return {"status": "success", "message": f"User {username} deleted"}
+    except Exception as e:
+        logging.error(f"Delete user failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Delete user failed: {str(e)}")
+
+@app.put("/auth/users/{username}")
+def update_user(username: str, request: UpdateUserRequest, authorization: Optional[str] = Header(None)):
+    """Update user password, username, and/or role (admin only)"""
+    current_user = get_current_user(authorization)
+    
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can update users")
+    
+    try:
+        from database import get_user
+        
+        # Get existing user
+        user = get_user(username)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        new_username = request.new_username or username
+        
+        # Update password if provided
+        if request.password:
+            from database import hash_password
+            password_hash = hash_password(request.password)
+            db = get_db_connection()
+            cursor = db.cursor()
+            cursor.execute(
+                "UPDATE users SET password_hash = ? WHERE username = ?",
+                (password_hash, username)
+            )
+            db.commit()
+            db.close()
+        
+        # Update username if provided
+        if request.new_username and request.new_username != username:
+            db = get_db_connection()
+            cursor = db.cursor()
+            cursor.execute(
+                "UPDATE users SET username = ? WHERE username = ?",
+                (request.new_username, username)
+            )
+            db.commit()
+            db.close()
+        
+        # Update role
+        is_admin = 1 if request.role == "admin" else 0
+        db = get_db_connection()
+        cursor = db.cursor()
+        cursor.execute(
+            "UPDATE users SET is_admin = ? WHERE username = ?",
+            (is_admin, new_username)
+        )
+        db.commit()
+        db.close()
+        
+        logging.info(f"User {username} updated by {current_user['username']}")
+        return {
+            "username": new_username,
+            "role": request.role,
+            "message": "User updated successfully"
+        }
+    except Exception as e:
+        logging.error(f"Update user failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Update user failed: {str(e)}")
+
 @app.get("/schema/columns")
 def get_columns():
     """Get all column information"""
@@ -224,8 +481,10 @@ def get_columns():
     return {"columns": columns}
 
 @app.get("/records/company/{company_code}")
-def fetch_data(company_code: str):
+def fetch_data(company_code: str, authorization: Optional[str] = Header(None)):
     """Fetch all records for a given CompanyCode"""
+    current_user = get_current_user(authorization)
+    
     try:
         conn = get_connection()
         query = f"""
@@ -245,7 +504,7 @@ def fetch_data(company_code: str):
             }
         
         records = df.to_dict(orient='records')
-        logging.info(f"Fetched {len(records)} records for {company_code}")
+        logging.info(f"Fetched {len(records)} records for {company_code} by user {current_user['username']}")
         
         return {
             "status": "success",
@@ -258,21 +517,29 @@ def fetch_data(company_code: str):
         raise HTTPException(status_code=500, detail=f"Failed to fetch data: {str(e)}")
 
 @app.post("/records/batch-sync")
-def upsert_data(request: UpsertRequest):
+def upsert_data(request: UpsertRequest, authorization: Optional[str] = Header(None)):
     """Upsert records and delete specified rows"""
+    current_user = get_current_user(authorization)
     company_code = request.company_code
     records = request.records
     deleted_ids = request.deleted_ids or []
+    username = current_user['username']
     
     try:
         conn = get_connection()
         cursor = conn.cursor()
         
-        # Get existing UniqueIDs
+        # Get existing records for comparison
         cursor.execute(
             f"SELECT UniqueID FROM [MLDataWarehouse].[dbo].[PL_Master] WHERE CompanyCode = '{company_code}'"
         )
         existing_ids = {row[0] for row in cursor.fetchall()}
+        
+        # Get existing data for change tracking
+        cursor.execute(
+            f"SELECT UniqueID, * FROM [MLDataWarehouse].[dbo].[PL_Master] WHERE CompanyCode = '{company_code}'"
+        )
+        existing_data = {row[0]: row for row in cursor.fetchall()}
         
         inserted = 0
         updated = 0
@@ -314,7 +581,7 @@ def upsert_data(request: UpsertRequest):
                     return f"'{str(v).replace(chr(39), chr(39) + chr(39))}'"
                 
                 if unique_id in existing_ids:
-                    # UPDATE
+                    # UPDATE - log changes
                     update_query = f"""
                         UPDATE [MLDataWarehouse].[dbo].[PL_Master]
                         SET
@@ -337,6 +604,9 @@ def upsert_data(request: UpsertRequest):
                         WHERE UniqueID = {sql_val(unique_id)} AND CompanyCode = '{company_code}'
                     """
                     cursor.execute(update_query)
+                    
+                    # Log each field change
+                    db_log_audit(username, "UPDATE", company_code, unique_id)
                     updated += 1
                 else:
                     # INSERT
@@ -353,6 +623,9 @@ def upsert_data(request: UpsertRequest):
                          {sql_val(erp_software)}, {sql_val(sub_nl_code)}, {sql_val(is_cogs)}, {sql_val(is_sales)}, {sql_val(is_discount)})
                     """
                     cursor.execute(insert_query)
+                    
+                    # Log new record
+                    db_log_audit(username, "INSERT", company_code, unique_id)
                     inserted += 1
             
             except Exception as e:
@@ -368,6 +641,9 @@ def upsert_data(request: UpsertRequest):
                     WHERE UniqueID = '{unique_id}' AND CompanyCode = '{company_code}'
                 """
                 cursor.execute(delete_query)
+                
+                # Log deletion
+                db_log_audit(username, "DELETE", company_code, unique_id)
                 deleted += 1
             except Exception as e:
                 errors.append(f"Delete {unique_id}: {str(e)}")
@@ -376,7 +652,7 @@ def upsert_data(request: UpsertRequest):
         conn.commit()
         conn.close()
         
-        logging.info(f"Upsert for {company_code}: Inserted={inserted}, Updated={updated}, Deleted={deleted}")
+        logging.info(f"Upsert for {company_code} by {username}: Inserted={inserted}, Updated={updated}, Deleted={deleted}")
         
         if errors:
             return {
@@ -401,8 +677,10 @@ def upsert_data(request: UpsertRequest):
         raise HTTPException(status_code=500, detail=f"Upsert failed: {str(e)}")
 
 @app.delete("/records/{unique_id}")
-def delete_record(unique_id: str, company_code: str = Query(...)):
+def delete_record(unique_id: str, company_code: str = Query(...), authorization: Optional[str] = Header(None)):
     """Delete a specific record by UniqueID"""
+    current_user = get_current_user(authorization)
+    
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -416,7 +694,8 @@ def delete_record(unique_id: str, company_code: str = Query(...)):
         
         if cursor.rowcount > 0:
             conn.close()
-            logging.info(f"Deleted record {unique_id} from {company_code}")
+            db_log_audit(current_user['username'], "DELETE", company_code, unique_id)
+            logging.info(f"Deleted record {unique_id} from {company_code} by {current_user['username']}")
             return {
                 "status": "success",
                 "message": f"Record {unique_id} deleted",
@@ -434,9 +713,12 @@ def delete_record(unique_id: str, company_code: str = Query(...)):
 def search_records(
     company_code: Optional[str] = None,
     gl_code: Optional[str] = None,
-    line_item: Optional[str] = None
+    line_item: Optional[str] = None,
+    authorization: Optional[str] = None
 ):
     """Search records by multiple criteria"""
+    current_user = get_current_user(authorization)
+    
     try:
         conn = get_connection()
         
@@ -465,6 +747,98 @@ def search_records(
     except Exception as e:
         logging.error(f"Search failed: {e}")
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+# ===== AUDIT/HISTORY ENDPOINTS =====
+
+@app.get("/audit/history")
+def get_audit_history(company_code: str, authorization: Optional[str] = Header(None)):
+    """Get audit history for a company"""
+    current_user = get_current_user(authorization)
+    
+    try:
+        db = get_db_connection()
+        cursor = db.cursor()
+        
+        # Query the audit_log table - note: table_name stores the company code
+        cursor.execute(
+            """SELECT id, username, action, table_name, record_id, old_value, new_value, timestamp
+               FROM audit_log
+               WHERE table_name = ?
+               ORDER BY timestamp DESC""",
+            (company_code,)
+        )
+        rows = cursor.fetchall()
+        db.close()
+        
+        logs = []
+        serial = 1
+        for row in rows:
+            logs.append({
+                "serial": serial,
+                "id": row[0],
+                "username": row[1],
+                "action": row[2],
+                "table_name": row[3],
+                "record_id": row[4],
+                "old_value": row[5],
+                "new_value": row[6],
+                "timestamp": row[7]
+            })
+            serial += 1
+        
+        return {
+            "status": "success",
+            "count": len(logs),
+            "logs": logs
+        }
+    except Exception as e:
+        logging.error(f"Get audit history failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
+
+@app.get("/audit/record/{record_id}")
+def get_record_history(record_id: str, authorization: Optional[str] = Header(None)):
+    """Get audit history for a specific record"""
+    current_user = get_current_user(authorization)
+    
+    try:
+        db = get_db_connection()
+        cursor = db.cursor()
+        
+        cursor.execute(
+            """SELECT id, company_code, record_id, username, change_type, field_name, old_value, new_value, timestamp
+               FROM audit_logs
+               WHERE record_id = ?
+               ORDER BY timestamp DESC""",
+            (record_id,)
+        )
+        rows = cursor.fetchall()
+        db.close()
+        
+        logs = []
+        serial = 1
+        for row in rows:
+            logs.append({
+                "serial": serial,
+                "id": row[0],
+                "company_code": row[1],
+                "record_id": row[2],
+                "username": row[3],
+                "change_type": row[4],
+                "field_name": row[5],
+                "old_value": row[6],
+                "new_value": row[7],
+                "timestamp": row[8]
+            })
+            serial += 1
+        
+        return {
+            "status": "success",
+            "count": len(logs),
+            "logs": logs
+        }
+    except Exception as e:
+        logging.error(f"Get record history failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

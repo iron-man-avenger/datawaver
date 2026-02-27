@@ -1,14 +1,13 @@
 import { useState } from 'react';
-import { Search, Database, AlertCircle } from 'lucide-react';
+import { Search, Database } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface CompanySearchProps {
   onSearch: (code: string) => void;
   isLoading: boolean;
-  error?: string | null;
 }
 
-export function CompanySearch({ onSearch, isLoading, error }: CompanySearchProps) {
+export function CompanySearch({ onSearch, isLoading }: CompanySearchProps) {
   const [value, setValue] = useState('C077');
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -29,8 +28,7 @@ export function CompanySearch({ onSearch, isLoading, error }: CompanySearchProps
             'bg-input border-border text-foreground',
             'focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary',
             'placeholder:text-muted-foreground/50',
-            'transition-all duration-200',
-            error ? 'border-destructive focus:ring-destructive/50' : ''
+            'transition-all duration-200'
           )}
         />
       </div>
@@ -58,13 +56,6 @@ export function CompanySearch({ onSearch, isLoading, error }: CompanySearchProps
           </>
         )}
       </button>
-
-      {error && (
-        <div className="flex items-center gap-1.5 text-destructive text-sm">
-          <AlertCircle size={14} />
-          <span>{error}</span>
-        </div>
-      )}
     </form>
   );
 }

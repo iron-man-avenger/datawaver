@@ -5,3 +5,5 @@ python-dotenv
 streamlit 
 pandas
 uvicorn
+bcrypt
+pyjwt
