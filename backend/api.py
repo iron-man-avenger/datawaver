@@ -24,7 +24,8 @@ logging.basicConfig(
 app = FastAPI(
     title="PL Master Data API",
     description="CRUD API for PL Master data management",
-    version="1.0.0"
+    version="1.0.0",
+    root_path="/datawaverapi"
 )
 
 # Enable CORS
