@@ -107,7 +107,8 @@ def fetch_data(company_code):
         query = f"""
             SELECT * FROM [MLDataWarehouse].[dbo].[PL_Master]
             WHERE CompanyCode = '{company_code}'
-            ORDER BY UniqueID
+            ORDER BY CASE WHEN GrandParentCode IS NULL OR ParentCode IS NULL OR LineItemCode IS NULL THEN 1 ELSE 0 END,
+                     CAST(GrandParentCode AS INT), CAST(ParentCode AS INT), CAST(LineItemCode AS INT)
         """
         df = pd.read_sql(query, conn)
         conn.close()

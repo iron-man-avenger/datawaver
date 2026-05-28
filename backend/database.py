@@ -9,9 +9,38 @@ import os
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict, Any
+from cryptography.fernet import Fernet
 
 # Database path - local folder
 DB_PATH = os.path.join(os.path.dirname(__file__), "datawaver.db")
+
+# Encryption key for password storage (stored locally)
+ENCRYPTION_KEY_PATH = os.path.join(os.path.dirname(__file__), ".encryption_key")
+
+def get_or_create_encryption_key():
+    """Get or create the encryption key for reversible password encryption"""
+    if os.path.exists(ENCRYPTION_KEY_PATH):
+        with open(ENCRYPTION_KEY_PATH, 'rb') as f:
+            return f.read()
+    else:
+        key = Fernet.generate_key()
+        with open(ENCRYPTION_KEY_PATH, 'wb') as f:
+            f.write(key)
+        return key
+
+ENCRYPTION_KEY = get_or_create_encryption_key()
+cipher = Fernet(ENCRYPTION_KEY)
+
+def encrypt_password(password: str) -> str:
+    """Encrypt a plain password for storage"""
+    return cipher.encrypt(password.encode('utf-8')).decode('utf-8')
+
+def decrypt_password(encrypted_password: str) -> str:
+    """Decrypt a stored encrypted password"""
+    try:
+        return cipher.decrypt(encrypted_password.encode('utf-8')).decode('utf-8')
+    except Exception:
+        return ""
 
 def get_db_connection():
     """Create a database connection"""
@@ -30,6 +59,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
+            encrypted_password TEXT,
             is_admin INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             active INTEGER DEFAULT 1,
@@ -63,6 +93,9 @@ def init_db():
     if "history_access" not in columns:
         cursor.execute("ALTER TABLE users ADD COLUMN history_access INTEGER DEFAULT 0")
         conn.commit()
+    if "encrypted_password" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN encrypted_password TEXT")
+        conn.commit()
     conn.close()
 
 def hash_password(password: str) -> str:
@@ -84,7 +117,11 @@ def get_user(username: str) -> Optional[Dict[str, Any]]:
     conn.close()
     
     if user:
-        return dict(user)
+        user_dict = dict(user)
+        # Decrypt password if available
+        if user_dict.get("encrypted_password"):
+            user_dict["password"] = decrypt_password(user_dict["encrypted_password"])
+        return user_dict
     return None
 
 def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
@@ -103,10 +140,11 @@ def create_user(username: str, password: str, is_admin: bool = False, history_ac
         conn = get_db_connection()
         cursor = conn.cursor()
         password_hash = hash_password(password)
+        encrypted_pwd = encrypt_password(password)
         
         cursor.execute(
-            "INSERT INTO users (username, password_hash, is_admin, active, history_access) VALUES (?, ?, ?, 1, ?)",
-            (username, password_hash, 1 if is_admin else 0, 1 if history_access else 0)
+            "INSERT INTO users (username, password_hash, encrypted_password, is_admin, active, history_access) VALUES (?, ?, ?, ?, 1, ?)",
+            (username, password_hash, encrypted_pwd, 1 if is_admin else 0, 1 if history_access else 0)
         )
         conn.commit()
         conn.close()
@@ -119,12 +157,18 @@ def get_all_users() -> List[Dict[str, Any]]:
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    cursor.execute("SELECT id, username, is_admin, created_at, history_access FROM users WHERE active = 1")
+    cursor.execute("SELECT id, username, is_admin, created_at, history_access, encrypted_password FROM users WHERE active = 1")
     users = [dict(row) for row in cursor.fetchall()]
     conn.close()
     
     for user in users:
         user["history_access"] = bool(user.get("history_access"))
+        # Decrypt password if available
+        if user.get("encrypted_password"):
+            user["password"] = decrypt_password(user["encrypted_password"])
+        else:
+            user["password"] = ""
+        del user["encrypted_password"]  # Remove encrypted version
     return users
 
 def delete_user(username: str) -> bool:

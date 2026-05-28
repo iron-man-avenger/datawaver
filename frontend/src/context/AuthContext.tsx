@@ -69,7 +69,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [clearSession]);
 
   const login = useCallback(async (usernameParam: string, password: string) => {
-    const response = await fetch('http://localhost:8015/datawaverapi/auth/login', {
+    const response = await fetch('http://10.200.7.77:8015/datawaverapi/auth/login', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

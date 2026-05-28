@@ -46,6 +46,20 @@ def get_user_logs(date: str) -> Dict[str, List[Dict[str, Any]]]:
     
     return all_logs
 
+
+def list_audit_dates() -> List[str]:
+    """List all stored audit folders (YYYY-MM-DD)"""
+    init_audit_dir()
+    if not os.path.isdir(AUDIT_LOGS_DIR):
+        return []
+
+    dates = [
+        folder for folder in os.listdir(AUDIT_LOGS_DIR)
+        if os.path.isdir(os.path.join(AUDIT_LOGS_DIR, folder))
+    ]
+    dates.sort(reverse=True)
+    return dates
+
 def log_change(
     username: str,
     company_code: str,

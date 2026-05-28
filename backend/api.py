@@ -1,3 +1,5 @@
+import asyncio
+
 import fastapi
 from fastapi import FastAPI, HTTPException, Query, Depends, status, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,9 +12,9 @@ import logging
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
-from database import init_db, get_db_connection, log_audit as db_log_audit, log_audit as db_log_audit
+from database import init_db, get_db_connection, log_audit as db_log_audit, log_audit as db_log_audit, get_user
 from auth import hash_password, verify_password, create_access_token, decode_token
-from audit_manager import log_change, get_user_history, get_all_history
+from audit_manager import log_change, get_user_history, get_all_history, list_audit_dates
 
 # Load environment variables from .env
 load_dotenv()
@@ -34,6 +36,8 @@ app = FastAPI(
     version="1.0.0",
     root_path="/datawaverapi"
 )
+
+keepalive_task: Optional[asyncio.Task] = None
 
 # Enable CORS
 app.add_middleware(
@@ -151,7 +155,7 @@ class UserResponse(BaseModel):
     role: str
     created_at: str
     is_active: bool
-    plain_password: Optional[str] = None
+    password: Optional[str] = None
     history_access: bool
 
 class AuditLogEntry(BaseModel):
@@ -237,10 +241,18 @@ def safe_int(val):
     """Convert value to integer or None"""
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return None
+        # Handle actual boolean types
+    if isinstance(val, bool):
+        return 1 if val else 0
     if isinstance(val, str):
         s = val.strip()
         if s == "" or s.lower() in {"nan", "none", "null"}:
             return None
+                # Handle boolean string values
+        if s.lower() in {"true", "yes", "1"}:
+            return 1
+        if s.lower() in {"false", "no", "0"}:
+            return 0
         try:
             return int(float(s.replace(",", "")))
         except ValueError:
@@ -252,6 +264,21 @@ def safe_int(val):
         return int(num)
     except (ValueError, TypeError):
         return None
+
+
+async def ping_sql_periodically() -> None:
+    """Keep the SQL connection alive by pinging it every 15 minutes."""
+    while True:
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+            conn.close()
+            logging.debug("SQL keepalive ping succeeded")
+        except Exception as exc:
+            logging.error(f"SQL keepalive failed: {exc}")
+        await asyncio.sleep(900)
 
 # Use log_audit from database module
 
@@ -351,7 +378,7 @@ def create_user(request: CreateUserRequest, authorization: Optional[str] = Heade
             "role": request.role,
             "created_at": datetime.now().isoformat(),
             "is_active": True,
-            "plain_password": request.password,
+            "password": request.password,
             "history_access": request.history_access,
         }
     except sqlite3.IntegrityError:
@@ -381,6 +408,7 @@ def list_users(authorization: Optional[str] = Header(None)):
                 "role": role,
                 "created_at": user['created_at'],
                 "is_active": True,
+                "password": user.get('password', ''),
                 "history_access": bool(user.get('history_access')),
             })
         
@@ -422,8 +450,6 @@ def update_user(username: str, request: UpdateUserRequest, authorization: Option
         raise HTTPException(status_code=403, detail="Only admins can update users")
     
     try:
-        from database import get_user
-        
         # Get existing user
         user = get_user(username)
         if not user:
@@ -433,13 +459,14 @@ def update_user(username: str, request: UpdateUserRequest, authorization: Option
         
         # Update password if provided
         if request.password:
-            from database import hash_password
+            from database import hash_password, encrypt_password
             password_hash = hash_password(request.password)
+            encrypted_pwd = encrypt_password(request.password)
             db = get_db_connection()
             cursor = db.cursor()
             cursor.execute(
-                "UPDATE users SET password_hash = ? WHERE username = ?",
-                (password_hash, username)
+                "UPDATE users SET password_hash = ?, encrypted_password = ? WHERE username = ?",
+                (password_hash, encrypted_pwd, username)
             )
             db.commit()
             db.close()
@@ -481,10 +508,15 @@ def update_user(username: str, request: UpdateUserRequest, authorization: Option
             db.close()
         
         logging.info(f"User {username} updated by {current_user['username']}")
+        
+        # Get updated user to return full info
+        updated_user = get_user(new_username)
+        
         return {
             "username": new_username,
             "role": request.role,
             "message": "User updated successfully",
+            "password": updated_user.get('password', '') if updated_user else '',
             "history_access": history_access_bool,
         }
     except Exception as e:
@@ -513,7 +545,8 @@ def fetch_data(company_code: str, authorization: Optional[str] = Header(None)):
         query = f"""
             SELECT * FROM [MLDataWarehouse].[dbo].[PL_Master]
             WHERE CompanyCode = '{company_code}'
-            ORDER BY UniqueID
+            ORDER BY CASE WHEN GrandParentCode IS NULL OR ParentCode IS NULL OR LineItemCode IS NULL THEN 1 ELSE 0 END,
+                     CAST(GrandParentCode AS INT), CAST(ParentCode AS INT), CAST(LineItemCode AS INT)
         """
         df = pd.read_sql(query, conn)
         conn.close()
@@ -818,7 +851,7 @@ def search_records(
     company_code: Optional[str] = None,
     gl_code: Optional[str] = None,
     line_item: Optional[str] = None,
-    authorization: Optional[str] = None
+    authorization: Optional[str] = Header(None)
 ):
     """Search records by multiple criteria"""
     current_user = get_current_user(authorization)
@@ -870,6 +903,7 @@ def get_audit_history(company_code: str, authorization: Optional[str] = Header(N
                WHERE table_name = ?
                ORDER BY timestamp DESC""",
             (company_code,)
+
         )
         rows = cursor.fetchall()
         db.close()
@@ -898,6 +932,26 @@ def get_audit_history(company_code: str, authorization: Optional[str] = Header(N
     except Exception as e:
         logging.error(f"Get audit history failed: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
+
+@app.on_event("startup")
+async def start_keepalive_task():
+    """Launch the keepalive ping when the application starts."""
+    global keepalive_task
+    if keepalive_task is None:
+        keepalive_task = asyncio.create_task(ping_sql_periodically())
+
+
+@app.on_event("shutdown")
+async def stop_keepalive_task():
+    """Cancel the keepalive ping when the application shuts down."""
+    if keepalive_task:
+        keepalive_task.cancel()
+        try:
+            await keepalive_task
+        except asyncio.CancelledError:
+            pass
+
+
 
 @app.get("/audit/record/{record_id}")
 def get_record_history(record_id: str, authorization: Optional[str] = Header(None)):
@@ -1040,6 +1094,22 @@ def get_all_audit_history(
         logging.error(f"Get all history failed: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
 
+
+@app.get("/audit/dates")
+def get_audit_dates(authorization: Optional[str] = Header(None)):
+    """Return the list of date folders available in audit_logs"""
+    current_user = get_current_user(authorization)
+
+    try:
+        dates = list_audit_dates()
+        return {
+            "status": "success",
+            "dates": dates
+        }
+    except Exception as e:
+        logging.error(f"Get audit dates failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get history dates")
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8015)
+    uvicorn.run(app, host="10.200.7.77", port=8015)

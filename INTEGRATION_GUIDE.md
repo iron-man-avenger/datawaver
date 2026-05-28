@@ -36,13 +36,13 @@ Start the API server:
 python -m uvicorn api:app --reload --host 0.0.0.0 --port 8015
 ```
 
-The API should now be running at: **http://localhost:8015**
+The API should now be running at: **http://10.200.7.77:8015**
 
 ### 2. Verify API Health
 
 Test the API health endpoint:
 ```bash
-curl http://localhost:8015/health
+curl http://10.200.7.77:8015/health
 ```
 
 Expected response:
@@ -63,7 +63,7 @@ Expected response:
 
 The `.env.local` file is already created with:
 ```
-VITE_API_BASE_URL=http://localhost:8015
+VITE_API_BASE_URL=http://10.200.7.77:8015
 ```
 
 If you need to change the API URL later, simply edit this file.
@@ -89,7 +89,7 @@ npm run dev
 bun run dev
 ```
 
-The frontend should now be running at: **http://localhost:5173** (or the port shown in terminal)
+The frontend should now be running at: **http://10.200.7.77:5173** (or the port shown in terminal)
 
 ---
 
@@ -160,7 +160,7 @@ Here's what the frontend calls:
 ### "Failed to load data" Error
 **Check:**
 1. Backend is running: `python -m uvicorn api:app --reload --host 0.0.0.0 --port 8015`
-2. API URL is correct in `.env.local`: `VITE_API_BASE_URL=http://localhost:8015`
+2. API URL is correct in `.env.local`: `VITE_API_BASE_URL=http://10.200.7.77:8015`
 3. Company code exists in database
 4. Database connection in backend `.env` file is correct
 

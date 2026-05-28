@@ -1,12 +1,14 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   fetchCompanyData,
   saveData,
+  deleteAllRecords,
   PLMasterRow,
 } from '@/lib/plMasterTypes';
 import { useTableEditor } from '@/hooks/useTableEditor';
 import { EditableTable } from '@/components/EditableTable';
 import { CompanySearch } from '@/components/CompanySearch';
+import { SearchBar } from '@/components/SearchFilterPanel';
 import { ToastNotification } from '@/components/ToastNotification';
 import { ColumnInfoPanel } from '@/components/ColumnInfoPanel';
 import { HistoryDialog } from '@/components/HistoryDialog';
@@ -14,9 +16,21 @@ import { useAuth } from '@/context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import {
   Plus, Save, RotateCcw, Download, Database, ChevronRight,
-  Layers, TrendingUp, FileSpreadsheet, AlertTriangle, History, LogOut, Settings,
+  Layers, TrendingUp, FileSpreadsheet, AlertTriangle, History, LogOut, Settings, Trash2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import { Checkbox } from '@/components/ui/checkbox';
+
 
 interface Toast {
   id: number;
@@ -47,16 +61,24 @@ function PLEditor({
   companyCode: string;
   onReload: () => void;
 }) {
+  const { token, canViewHistory } = useAuth();
   const { rows, deletedIds, addRow, updateCell, deleteRow, duplicateRow, reorderRows, validateRows, resetToOriginal, getStats } =
     useTableEditor({ initialRows, companyCode });
-  const { canViewHistory } = useAuth();
-
+  
+  const [filteredRows, setFilteredRows] = useState<PLMasterRow[]>([]);
   const [isSaving, setIsSaving] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [showValidation, setShowValidation] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [showDeleteAllDialog, setShowDeleteAllDialog] = useState(false);
+  const [deleteConfirmChecked, setDeleteConfirmChecked] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const toastId = useRef(1);
+
+  // Determine which rows to display: filtered or all rows
+  const displayRows = filteredRows.length > 0 ? filteredRows : rows;
+  const isFilterActive = filteredRows.length > 0 && filteredRows.length < rows.length;
 
   const addToast = (type: Toast['type'], title: string, message?: string) => {
     const id = toastId.current++;
@@ -77,7 +99,10 @@ function PLEditor({
     setShowValidation(false);
     setIsSaving(true);
     try {
-      const result = await saveData(rows, deletedIds, companyCode);
+      if (!token) {
+        throw new Error('Authentication token missing. Please log in again.');
+      }
+      const result = await saveData(rows, deletedIds, companyCode, token);
       if (result.errors.length > 0) {
         addToast('error', 'Saved with errors', result.errors.slice(0, 3).join('\n'));
       } else {
@@ -118,6 +143,29 @@ function PLEditor({
     URL.revokeObjectURL(url);
   };
 
+  const handleDeleteAll = async () => {
+    setShowDeleteAllDialog(false);
+    setIsDeleting(true);
+    try {
+      if (!token) {
+        throw new Error('Authentication token missing. Please log in again.');
+      }
+      // Get all record IDs from current rows
+      const allRecordIds = rows.map(r => r.UniqueID);
+      const result = await deleteAllRecords(allRecordIds, companyCode, token);
+      if (result.errors.length > 0) {
+        addToast('error', 'Deleted with errors', result.errors.slice(0, 3).join('\n'));
+      } else {
+        addToast('success', 'Deleted successfully', `Deleted all ${result.deleted} records`);
+        onReload();
+      }
+    } catch (err: any) {
+      addToast('error', 'Delete failed', err.message);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   const stats = getStats();
 
   return (
@@ -138,6 +186,12 @@ function PLEditor({
         {/* Right: actions */}
         <div className="flex items-center gap-2 relative">
           <ColumnInfoPanel />
+
+          {/* Search Bar */}
+          <SearchBar
+            records={rows}
+            onFilteredResults={setFilteredRows}
+          />
 
           {canViewHistory && (
             <button
@@ -171,6 +225,19 @@ function PLEditor({
           >
             <RotateCcw size={13} />
             Reload
+          </button>
+
+          <button
+            onClick={() => setShowDeleteAllDialog(true)}
+            disabled={isDeleting || stats.total === 0}
+            className={cn(
+              'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold',
+              'bg-destructive/20 text-destructive hover:bg-destructive/30 transition-colors border border-destructive/30',
+              'disabled:opacity-50 disabled:cursor-not-allowed'
+            )}
+          >
+            <Trash2 size={13} />
+            Delete All
           </button>
 
           <button
@@ -232,12 +299,12 @@ function PLEditor({
       {/* Table */}
       <div className="flex-1 overflow-hidden">
         <EditableTable
-          rows={rows}
+          rows={displayRows}
           onUpdateCell={updateCell}
           onDeleteRow={deleteRow}
           onDuplicateRow={duplicateRow}
           onAddRowAfter={addRow}
-          onReorderRows={reorderRows}
+          onReorderRows={isFilterActive ? undefined : reorderRows}
         />
       </div>
 
@@ -259,6 +326,59 @@ function PLEditor({
         companyCode={companyCode}
         showAllHistory={canViewHistory}
       />
+
+      {/* Delete All Dialog */}
+      <AlertDialog 
+        open={showDeleteAllDialog} 
+        onOpenChange={(open) => {
+          setShowDeleteAllDialog(open);
+          if (!open) setDeleteConfirmChecked(false);
+        }}
+      >
+        <AlertDialogContent className="max-w-md">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-destructive">Delete All Records?</AlertDialogTitle>
+            <AlertDialogDescription className="space-y-3">
+              <div className="bg-destructive/10 border border-destructive/30 rounded-md p-3">
+                <p className="text-sm font-semibold text-destructive mb-2">⚠️ Warning</p>
+                <p className="text-sm text-destructive">This will <strong>permanently delete all {stats.total} records</strong> for company code <span className="font-mono font-bold">{companyCode}</span>.</p>
+                <p className="text-sm text-destructive mt-2"><strong>This action CANNOT be undone.</strong></p>
+              </div>
+              
+              <div className="flex items-center gap-2 mt-4 p-3 bg-muted rounded-md">
+                <Checkbox 
+                  id="delete-confirm"
+                  checked={deleteConfirmChecked}
+                  onCheckedChange={(checked) => setDeleteConfirmChecked(checked === true)}
+                />
+                <label 
+                  htmlFor="delete-confirm"
+                  className="text-sm font-semibold cursor-pointer flex-1"
+                >
+                  I understand that all records will be permanently deleted
+                </label>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDeleteAll}
+              disabled={isDeleting || !deleteConfirmChecked}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isDeleting ? (
+                <>
+                  <span className="inline-block w-3 h-3 border-2 border-destructive-foreground/30 border-t-destructive-foreground rounded-full animate-spin mr-2" />
+                  Deleting…
+                </>
+              ) : (
+                'Delete All Records'
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -267,7 +387,7 @@ function PLEditor({
 // Main page
 // ──────────────────────────────────────────────────────────────────────
 const Index = () => {
-  const { username, role, logout } = useAuth();
+  const { username, role, logout, token } = useAuth();
   const navigate = useNavigate();
   const [companyCode, setCompanyCode] = useState('');
   const [data, setData] = useState<PLMasterRow[] | null>(null);
@@ -280,8 +400,15 @@ const Index = () => {
     setLoadError(null);
     setData(null);
     setCompanyCode(code);
+
+    if (!token) {
+      setLoadError('Authentication token missing. Please log in again.');
+      setIsLoading(false);
+      return;
+    }
+
     try {
-      const rows = await fetchCompanyData(code);
+      const rows = await fetchCompanyData(code, token);
       setData(rows);
       setLoadedCode(code);
     } catch (err: any) {
@@ -289,7 +416,7 @@ const Index = () => {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [token]);
 
   const handleReload = useCallback(() => {
     if (loadedCode) handleSearch(loadedCode);

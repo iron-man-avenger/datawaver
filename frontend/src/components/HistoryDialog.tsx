@@ -7,6 +7,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '../components/ui/dialog';
+import { Input } from '../components/ui/input';
+import { Label } from '../components/ui/label';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
 import { Alert, AlertDescription } from '../components/ui/alert';
 import { Badge } from '../components/ui/badge';
@@ -61,12 +63,57 @@ export const HistoryDialog: React.FC<HistoryDialogProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [expandedRecords, setExpandedRecords] = useState<Set<string>>(new Set());
+  const [startDate, setStartDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
+  const [endDate, setEndDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
+  const [availableDates, setAvailableDates] = useState<string[]>([]);
+  const [selectedDateFolder, setSelectedDateFolder] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (selectedDateFolder && (startDate !== selectedDateFolder || endDate !== selectedDateFolder)) {
+      setSelectedDateFolder(null);
+    }
+  }, [startDate, endDate, selectedDateFolder]);
+
+  useEffect(() => {
+    if (!isOpen || !token) {
+      return;
+    }
+
+    const loadDates = async () => {
+      try {
+        const response = await fetch('http://10.200.7.77:8015/datawaverapi/audit/dates', {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        });
+
+        if (!response.ok) {
+          console.warn('Failed to load audit snapshots', response.statusText);
+          return;
+        }
+
+        const data = await response.json();
+        const dates = Array.isArray(data.dates) ? data.dates.slice().sort((a, b) => b.localeCompare(a)) : [];
+        setAvailableDates(dates);
+      } catch (err) {
+        console.error('Failed to fetch audit dates', err);
+      }
+    };
+
+    loadDates();
+  }, [isOpen, token]);
+
+  const handleDateFolderSelect = (date: string) => {
+    setStartDate(date);
+    setEndDate(date);
+    setSelectedDateFolder(date);
+  };
 
   useEffect(() => {
     if (isOpen) {
       loadHistory();
     }
-  }, [isOpen, companyCode, recordId, token, showAllHistory]);
+  }, [isOpen, companyCode, recordId, token, showAllHistory, startDate, endDate]);
 
   const loadHistory = async () => {
     setLoading(true);
@@ -75,14 +122,25 @@ export const HistoryDialog: React.FC<HistoryDialogProps> = ({
     setRecordChanges([]);
 
     try {
+      if (startDate && endDate) {
+        const start = new Date(startDate);
+        const end = new Date(endDate);
+        if (start > end) {
+          setError('Start date cannot be after end date');
+          return;
+        }
+      }
+
       // Use the new user-history endpoint for current user
       const endpoint = showAllHistory ? 'audit/all-history' : 'audit/user-history';
-      let url = `http://localhost:8015/datawaverapi/${endpoint}`;
+      let url = `http://10.200.7.77:8015/datawaverapi/${endpoint}`;
       
       // Add optional filters
       const params = new URLSearchParams();
       if (companyCode) params.append('company_code', companyCode);
       if (recordId) params.append('record_id', recordId);
+      if (startDate) params.append('start_date', startDate);
+      if (endDate) params.append('end_date', endDate);
       
       if (params.toString()) {
         url += `?${params.toString()}`;
@@ -95,6 +153,9 @@ export const HistoryDialog: React.FC<HistoryDialogProps> = ({
       });
 
       if (!response.ok) {
+        if (response.status === 403) {
+          throw new Error('Access denied. You do not have permission to view all history. Please contact your administrator or log out and back in if your permissions were recently changed.');
+        }
         throw new Error('Failed to load history');
       }
 
@@ -180,6 +241,51 @@ export const HistoryDialog: React.FC<HistoryDialogProps> = ({
             {recordId ? `Record: ${recordId}` : `Company: ${companyCode}`} • Showing {recordChanges.length} {recordChanges.length === 1 ? 'change' : 'changes'}
           </DialogDescription>
         </DialogHeader>
+
+        <div className="px-4 pb-4 space-y-3">
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="flex flex-col gap-2">
+              <Label className="text-xs text-zinc-400">Start date</Label>
+              <Input
+                type="date"
+                value={startDate}
+                onChange={(event) => setStartDate(event.target.value)}
+              />
+            </div>
+            <div className="flex flex-col gap-2">
+              <Label className="text-xs text-zinc-400">End date</Label>
+              <Input
+                type="date"
+                value={endDate}
+                onChange={(event) => setEndDate(event.target.value)}
+              />
+            </div>
+          </div>
+          <div className="space-y-2">
+            <p className="text-[11px] text-zinc-500">
+              Select any date range or tap a stored snapshot; logs are kept inside audit_logs/YYYY-MM-DD per user.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {availableDates.length === 0 ? (
+                <span className="text-xs text-zinc-500">No archived folders yet</span>
+              ) : (
+                availableDates.map((date) => {
+                  const isSelected = selectedDateFolder === date;
+                  return (
+                    <button
+                      key={date}
+                      type="button"
+                      onClick={() => handleDateFolderSelect(date)}
+                      className={`rounded-full border px-3 py-1 text-[11px] font-mono transition ${isSelected ? 'bg-blue-500/20 border-blue-500/60 text-blue-200' : 'bg-zinc-900/40 border-zinc-700/60 text-zinc-300 hover:border-zinc-500/60 hover:bg-zinc-900/70'}`}
+                    >
+                      {date}
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
 
         {error && (
           <Alert variant="destructive" className="bg-red-950/50 border-red-900/50 rounded-lg">

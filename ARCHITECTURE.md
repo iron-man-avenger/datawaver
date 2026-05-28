@@ -5,7 +5,7 @@
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         FRONTEND (React)                         │
-│                      localhost:5173                              │
+│                      10.200.7.77:5173                              │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                   │
 │  ┌─────────────────────────────────────────────────────────┐   │
@@ -38,12 +38,12 @@
 └─────────────────┼──────────────────────────────────────────────┘
                   │
                   │ ◄── .env.local ──► VITE_API_BASE_URL
-                  │                   http://localhost:8015
+                  │                   http://10.200.7.77:8015
                   │
                   ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                       BACKEND (FastAPI)                          │
-│                      localhost:8015                              │
+│                      10.200.7.77:8015                              │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                   │
 │  ┌─────────────────────────────────────────────────────────┐   │
@@ -112,7 +112,7 @@ fetchCompanyData("C077") [from plMasterTypes.ts]
 apiFetchCompanyData("C077") [from apiClient.ts]
             │
             ▼
-fetch("http://localhost:8015/records/company/C077")
+fetch("http://10.200.7.77:8015/records/company/C077")
             │
             ▼ HTTP GET Request
             │
@@ -183,7 +183,7 @@ apiSaveData(...)
 Filter UI tracking fields (_rowId, _isNew, etc.)
             │
             ▼
-fetch("http://localhost:8015/records/batch-sync", {
+fetch("http://10.200.7.77:8015/records/batch-sync", {
   method: "POST",
   body: {
     company_code: "C077",
@@ -326,7 +326,7 @@ Response received?
 
 ### Frontend (.env.local)
 ```env
-VITE_API_BASE_URL=http://localhost:8015
+VITE_API_BASE_URL=http://10.200.7.77:8015
 ```
 
 ### Backend (.env)

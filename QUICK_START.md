@@ -25,7 +25,7 @@ I've successfully integrated your **FastAPI backend** with the **React frontend*
    - ✅ Real API calls - ADDED
 
 ### 3. **Added Environment Configuration** (`.env.local`)
-   - `VITE_API_BASE_URL=http://localhost:8015`
+   - `VITE_API_BASE_URL=http://10.200.7.77:8015`
    - Easy to change backend URL if needed
 
 ### 4. **Enhanced Error Handling** (`Index.tsx`)
@@ -55,7 +55,7 @@ npm run dev
 ```
 
 ### Step 3: Test the Integration
-1. Open `http://localhost:5173` in your browser
+1. Open `http://10.200.7.77:5173` in your browser
 2. Enter a **Company Code** (e.g., `C077`)
 3. Click **Load Data**
 4. Edit some cells
@@ -141,7 +141,7 @@ QUICK_START.md (this file)
 ### Backend API URL
 Edit `frontend/.env.local`:
 ```env
-VITE_API_BASE_URL=http://localhost:8015
+VITE_API_BASE_URL=http://10.200.7.77:8015
 ```
 
 ### Database Connection
@@ -222,7 +222,7 @@ DB_PASSWORD=your-password
 
 ## 📚 Additional Resources
 
-- **Backend API Docs**: Run backend and visit `http://localhost:8015/docs`
+- **Backend API Docs**: Run backend and visit `http://10.200.7.77:8015/docs`
 - **Integration Guide**: See `INTEGRATION_GUIDE.md` for detailed setup
 - **API Client Code**: See `frontend/src/lib/apiClient.ts` for all API calls
 - **Component Code**: See `frontend/src/pages/Index.tsx` for UI integration

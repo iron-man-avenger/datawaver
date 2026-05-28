@@ -50,8 +50,10 @@ export const AdminPage: React.FC = () => {
   const [editHistoryAccess, setEditHistoryAccess] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [lastCreatedPassword, setLastCreatedPassword] = useState('');
+  const [lastCreatedUsername, setLastCreatedUsername] = useState('');
   const [showCreatedPassword, setShowCreatedPassword] = useState(false);
   const [passwordCopied, setPasswordCopied] = useState(false);
+  const [bothCopied, setBothCopied] = useState(false);
 
   // Check if user is admin
   useEffect(() => {
@@ -67,7 +69,7 @@ export const AdminPage: React.FC = () => {
 
   const loadUsers = async () => {
     try {
-      const response = await fetch('http://localhost:8015/datawaverapi/auth/users', {
+      const response = await fetch('http://10.200.7.77:8015/datawaverapi/auth/users', {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -92,7 +94,7 @@ export const AdminPage: React.FC = () => {
     setLoading(true);
 
     try {
-      const response = await fetch('http://localhost:8015/datawaverapi/auth/users', {
+      const response = await fetch('http://10.200.7.77:8015/datawaverapi/auth/users', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -113,6 +115,7 @@ export const AdminPage: React.FC = () => {
 
       setSuccess(`User ${newUsername} created successfully`);
       setLastCreatedPassword(newPassword);
+      setLastCreatedUsername(newUsername);
       setShowCreatedPassword(true);
       setNewUsername('');
       setNewPassword('');
@@ -133,7 +136,7 @@ export const AdminPage: React.FC = () => {
     setLoading(true);
 
     try {
-      const response = await fetch(`http://localhost:8015/datawaverapi/auth/users/${userToDeleteConfirm}`, {
+      const response = await fetch(`http://10.200.7.77:8015/datawaverapi/auth/users/${userToDeleteConfirm}`, {
         method: 'DELETE',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -172,7 +175,7 @@ export const AdminPage: React.FC = () => {
     setLoading(true);
 
     try {
-      const response = await fetch(`http://localhost:8015/datawaverapi/auth/users/${userToEdit}`, {
+      const response = await fetch(`http://10.200.7.77:8015/datawaverapi/auth/users/${userToEdit}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -211,6 +214,14 @@ export const AdminPage: React.FC = () => {
     setTimeout(() => setPasswordCopied(false), 2000);
   };
 
+  // Handle copy both username and password
+  const handleCopyBoth = () => {
+    const bothText = `Username: ${lastCreatedUsername}\nPassword: ${lastCreatedPassword}`;
+    navigator.clipboard.writeText(bothText);
+    setBothCopied(true);
+    setTimeout(() => setBothCopied(false), 2000);
+  };
+
   return (
     <div className="min-h-screen bg-zinc-950">
       {/* Header Section */}
@@ -232,6 +243,10 @@ export const AdminPage: React.FC = () => {
                 setNewRole('user');
                 setNewHistoryAccess(false);
                 setShowCreatedPassword(false);
+                setLastCreatedUsername('');
+                setLastCreatedPassword('');
+                setPasswordCopied(false);
+                setBothCopied(false);
                 setShowCreateModal(true);
               }}
               className="bg-blue-600 hover:bg-blue-700 text-white gap-2 px-6 h-10 rounded-lg"
@@ -254,6 +269,13 @@ export const AdminPage: React.FC = () => {
         {success && (
           <Alert className="mb-6 bg-green-950/50 border-green-900 rounded-lg">
             <AlertDescription className="text-green-200">{success}</AlertDescription>
+          </Alert>
+        )}
+        {success && (success.includes('updated') || success.includes('created')) && (
+          <Alert className="mb-4 bg-blue-950/50 border-blue-900 rounded-lg">
+            <AlertDescription className="text-blue-200 text-sm">
+              💡 Note: If you changed history access permissions, the user must log out and log back in for changes to take effect.
+            </AlertDescription>
           </Alert>
         )}
 
@@ -433,18 +455,29 @@ export const AdminPage: React.FC = () => {
               </div>
             </div>
 
-            {/* Success State with Password Display */}
+            {/* Success State with Credentials Display */}
             {showCreatedPassword && success && (
-              <div className="mt-6 p-4 rounded-lg bg-green-950/40 border border-green-900/50">
-                <p className="text-green-300 text-sm font-medium mb-3">User created successfully! ✓</p>
-                <div className="bg-zinc-900 rounded border border-zinc-700 p-3 mb-3">
-                  <p className="text-zinc-400 text-xs mb-2">Initial password:</p>
+              <div className="mt-6 space-y-3 p-4 rounded-lg bg-green-950/40 border border-green-900/50">
+                <p className="text-green-300 text-sm font-medium">✓ User created successfully!</p>
+                
+                {/* Username Display */}
+                <div className="bg-zinc-900 rounded border border-zinc-700 p-3">
+                  <p className="text-zinc-400 text-xs mb-2">Username:</p>
+                  <div className="flex items-center gap-2">
+                    <code className="flex-1 text-blue-300 font-mono text-sm break-all">{lastCreatedUsername}</code>
+                  </div>
+                </div>
+
+                {/* Password Display */}
+                <div className="bg-zinc-900 rounded border border-zinc-700 p-3">
+                  <p className="text-zinc-400 text-xs mb-2">Password:</p>
                   <div className="flex items-center gap-2">
                     <code className="flex-1 text-green-300 font-mono text-sm break-all">{lastCreatedPassword}</code>
                     <button
                       type="button"
                       onClick={handleCopyPassword}
                       className="p-1.5 rounded hover:bg-zinc-800 transition-colors"
+                      title="Copy password"
                     >
                       {passwordCopied ? (
                         <Check size={16} className="text-green-400" />
@@ -454,6 +487,26 @@ export const AdminPage: React.FC = () => {
                     </button>
                   </div>
                 </div>
+
+                {/* Copy Both Button */}
+                <button
+                  type="button"
+                  onClick={handleCopyBoth}
+                  className="w-full px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium transition-colors flex items-center justify-center gap-2"
+                  title="Copy both username and password"
+                >
+                  {bothCopied ? (
+                    <>
+                      <Check size={16} className="text-green-300" />
+                      Copied!
+                    </>
+                  ) : (
+                    <>
+                      <Copy size={16} />
+                      Copy Both
+                    </>
+                  )}
+                </button>
               </div>
             )}
 
