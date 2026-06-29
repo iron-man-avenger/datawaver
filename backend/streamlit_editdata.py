@@ -108,7 +108,12 @@ def fetch_data(company_code):
             SELECT * FROM [MLDataWarehouse].[dbo].[PL_Master]
             WHERE CompanyCode = '{company_code}'
             ORDER BY CASE WHEN GrandParentCode IS NULL OR ParentCode IS NULL OR LineItemCode IS NULL THEN 1 ELSE 0 END,
-                     CAST(GrandParentCode AS INT), CAST(ParentCode AS INT), CAST(LineItemCode AS INT)
+                     CASE WHEN TRY_CONVERT(DECIMAL(18,4), GrandParentCode) IS NULL THEN 1 ELSE 0 END,
+                     TRY_CONVERT(DECIMAL(18,4), GrandParentCode), GrandParentCode,
+                     CASE WHEN TRY_CONVERT(DECIMAL(18,4), ParentCode) IS NULL THEN 1 ELSE 0 END,
+                     TRY_CONVERT(DECIMAL(18,4), ParentCode), ParentCode,
+                     CASE WHEN TRY_CONVERT(DECIMAL(18,4), LineItemCode) IS NULL THEN 1 ELSE 0 END,
+                     TRY_CONVERT(DECIMAL(18,4), LineItemCode), LineItemCode
         """
         df = pd.read_sql(query, conn)
         conn.close()

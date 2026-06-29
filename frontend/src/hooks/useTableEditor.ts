@@ -6,6 +6,72 @@ interface UseTableEditorProps {
   companyCode: string;
 }
 
+export interface CopyDeltaPayload {
+  changedRecords: PLMasterRow[];
+  deletedIds: string[];
+}
+
+function normalizeValueForCompare(column: keyof PLMasterRow, value: any): any {
+  if (value === undefined || value === '') {
+    return null;
+  }
+
+  if (BIT_COLUMNS.has(column as string)) {
+    if (value === true) return 1;
+    if (value === false) return 0;
+    if (value === null) return null;
+    const parsed = Number(value);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+
+  return value;
+}
+
+export function computeCopyDelta(
+  rows: PLMasterRow[],
+  deletedIds: string[],
+  originalRows: PLMasterRow[]
+): CopyDeltaPayload {
+  const changedRecords: PLMasterRow[] = [];
+
+  rows.forEach(row => {
+    if (row._isNew) {
+      changedRecords.push(row);
+      return;
+    }
+
+    const rowId = row._rowId || '';
+    if (!rowId.startsWith('orig-')) {
+      return;
+    }
+
+    const rowIndex = parseInt(rowId.replace('orig-', ''), 10);
+    if (Number.isNaN(rowIndex)) {
+      return;
+    }
+
+    const original = originalRows[rowIndex];
+    if (!original) {
+      return;
+    }
+
+    const hasAnyFieldChanged = ALL_COLUMNS.some(column => {
+      const currentValue = normalizeValueForCompare(column, row[column]);
+      const originalValue = normalizeValueForCompare(column, original[column]);
+      return currentValue !== originalValue;
+    });
+
+    if (hasAnyFieldChanged) {
+      changedRecords.push(row);
+    }
+  });
+
+  return {
+    changedRecords,
+    deletedIds: [...deletedIds],
+  };
+}
+
 export function useTableEditor({ initialRows, companyCode }: UseTableEditorProps) {
   const [rows, setRows] = useState<PLMasterRow[]>(() =>
     initialRows.map((r, i) => ({ ...r, _rowId: `orig-${i}` }))
@@ -126,6 +192,10 @@ export function useTableEditor({ initialRows, companyCode }: UseTableEditorProps
     deletedRows: deletedIds.length,
   }), [rows, deletedIds]);
 
+  const getCopyDelta = useCallback((): CopyDeltaPayload => {
+    return computeCopyDelta(rows, deletedIds, originalRowsRef.current);
+  }, [rows, deletedIds]);
+
   return {
     rows,
     deletedIds,
@@ -137,5 +207,6 @@ export function useTableEditor({ initialRows, companyCode }: UseTableEditorProps
     validateRows,
     resetToOriginal,
     getStats,
+    getCopyDelta,
   };
 }

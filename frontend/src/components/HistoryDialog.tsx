@@ -234,7 +234,7 @@ export const HistoryDialog: React.FC<HistoryDialogProps> = ({
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto bg-zinc-900 border-zinc-800 rounded-xl">
+      <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto scrollbar-dark bg-zinc-900 border-zinc-800 rounded-xl">
         <DialogHeader>
           <DialogTitle className="text-white text-2xl">Change History</DialogTitle>
           <DialogDescription className="text-zinc-400">

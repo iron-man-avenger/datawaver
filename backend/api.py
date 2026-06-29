@@ -1,4 +1,5 @@
 import asyncio
+import re
 
 import fastapi
 from fastapi import FastAPI, HTTPException, Query, Depends, status, Header
@@ -10,7 +11,7 @@ import os
 from datetime import datetime
 import logging
 from dotenv import load_dotenv
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from database import init_db, get_db_connection, log_audit as db_log_audit, log_audit as db_log_audit, get_user
 from auth import hash_password, verify_password, create_access_token, decode_token
@@ -120,6 +121,16 @@ class UpsertRequest(BaseModel):
     company_code: str
     records: List[PLMasterRecord]
     deleted_ids: Optional[List[str]] = []
+
+class TargetCompanySite(BaseModel):
+    company_code: str
+    site_code: str
+
+class CopyChangesRequest(BaseModel):
+    source_company_code: str
+    source_site_code: str
+    targets: List[TargetCompanySite] = Field(default_factory=list)
+    confirm_overwrite: Optional[bool] = False
 
 class ColumnInfo(BaseModel):
     column_name: str
@@ -265,6 +276,114 @@ def safe_int(val):
     except (ValueError, TypeError):
         return None
 
+def normalize_company_code(company_code: Optional[str]) -> Optional[str]:
+    """Normalize company code for API operations."""
+    value = safe_val(company_code)
+    if value is None:
+        return None
+    return value.upper()
+
+def is_valid_company_code(company_code: Optional[str]) -> bool:
+    """Validate canonical company code format (C followed by digits)."""
+    normalized_code = normalize_company_code(company_code)
+    if not normalized_code:
+        return False
+    return bool(re.match(r"^C\d+$", normalized_code))
+
+def extract_company_prefix(company_code: Optional[str]) -> Optional[str]:
+    """Extract numeric company prefix used in UniqueID values."""
+    normalized_code = normalize_company_code(company_code)
+    if not normalized_code:
+        return None
+
+    digits = "".join(ch for ch in normalized_code if ch.isdigit())
+    if not digits:
+        return None
+
+    stripped = digits.lstrip("0")
+    return stripped if stripped else "0"
+
+def normalize_unique_prefix(prefix: str) -> str:
+    """Normalize prefix fragments so 077 and 77 are treated the same."""
+    stripped = prefix.lstrip("0")
+    return stripped if stripped else "0"
+
+def parse_unique_id(unique_id: Optional[str]) -> Optional[Dict[str, str]]:
+    """Parse UniqueID as prefix + separator + suffix.
+
+    Accept common separators (:, /, \\) used in various UniqueID formats.
+    """
+    value = safe_val(unique_id)
+    if value is None:
+        return None
+
+    # allow colon, forward slash or backslash as separator
+    match = re.match(r"^([^:/\\]+)([:/\\])(.+)$", value)
+    if not match:
+        return None
+
+    prefix, separator, suffix = match.groups()
+    if not suffix.strip():
+        return None
+
+    return {
+        "prefix": prefix.strip(),
+        "separator": separator,
+        "suffix": suffix.strip(),
+    }
+
+def remap_unique_id(source_unique_id: Optional[str], source_company_code: str, target_company_code: str) -> Optional[str]:
+    """Remap source UniqueID to target company prefix while preserving suffix."""
+    # Try structured parse first
+    parsed = parse_unique_id(source_unique_id)
+
+    source_prefix = extract_company_prefix(source_company_code)
+    target_prefix = extract_company_prefix(target_company_code)
+
+    if source_prefix is None or target_prefix is None:
+        return None
+
+    if parsed is not None:
+        # parsed.prefix may include a leading 'C' or other chars (e.g., 'C151')
+        parsed_prefix_digits = ''.join(ch for ch in parsed['prefix'] if ch.isdigit())
+        if not parsed_prefix_digits:
+            return None
+        parsed_prefix = normalize_unique_prefix(parsed_prefix_digits)
+        if parsed_prefix == source_prefix:
+            return f"{target_prefix}{parsed['separator']}{parsed['suffix']}"
+        # parsed but prefix doesn't match expected source prefix -> invalid
+        return None
+
+    # Fallback: try to remap by finding numeric source prefix occurrences in the UniqueID string.
+    s = safe_val(source_unique_id)
+    if not s:
+        return None
+
+    # Try to match an optional leading 'C' + digits (company code) at the start
+    try:
+        m = re.match(rf"^(C?0*{re.escape(source_prefix)})", s, re.IGNORECASE)
+        if m:
+            new = re.sub(re.escape(m.group(1)), f"{target_prefix}", s, count=1, flags=re.IGNORECASE)
+            return new
+    except re.error:
+        pass
+
+    # Otherwise find a standalone occurrence of the source_prefix (not surrounded by digits)
+    m2 = re.search(rf"(?<!\d){re.escape(source_prefix)}(?!\d)", s)
+    if m2:
+        new = s[:m2.start()] + target_prefix + s[m2.end():]
+        return new
+
+    return None
+
+def sql_literal(value: Any) -> str:
+    """Convert python values into SQL literal fragments."""
+    if value is None:
+        return "NULL"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return f"'{str(value).replace(chr(39), chr(39) + chr(39))}'"
+
 
 async def ping_sql_periodically() -> None:
     """Keep the SQL connection alive by pinging it every 15 minutes."""
@@ -292,7 +411,9 @@ def read_root():
         "version": "1.0.0",
         "endpoints": {
             "GET /records/company/{company_code}": "Fetch all records for a company",
+            "GET /records/companies": "List searchable company codes",
             "POST /records/batch-sync": "Upsert records and delete specified rows",
+            "POST /records/copy-changes": "Overwrite target companies with source master snapshot",
             "DELETE /records/{unique_id}": "Delete a specific record",
             "GET /schema/columns": "Get column metadata",
             "GET /records/search": "Search records by criteria",
@@ -546,7 +667,12 @@ def fetch_data(company_code: str, authorization: Optional[str] = Header(None)):
             SELECT * FROM [MLDataWarehouse].[dbo].[PL_Master]
             WHERE CompanyCode = '{company_code}'
             ORDER BY CASE WHEN GrandParentCode IS NULL OR ParentCode IS NULL OR LineItemCode IS NULL THEN 1 ELSE 0 END,
-                     CAST(GrandParentCode AS INT), CAST(ParentCode AS INT), CAST(LineItemCode AS INT)
+                     CASE WHEN TRY_CONVERT(DECIMAL(18,4), GrandParentCode) IS NULL THEN 1 ELSE 0 END,
+                     TRY_CONVERT(DECIMAL(18,4), GrandParentCode), GrandParentCode,
+                     CASE WHEN TRY_CONVERT(DECIMAL(18,4), ParentCode) IS NULL THEN 1 ELSE 0 END,
+                     TRY_CONVERT(DECIMAL(18,4), ParentCode), ParentCode,
+                     CASE WHEN TRY_CONVERT(DECIMAL(18,4), LineItemCode) IS NULL THEN 1 ELSE 0 END,
+                     TRY_CONVERT(DECIMAL(18,4), LineItemCode), LineItemCode
         """
         df = pd.read_sql(query, conn)
         conn.close()
@@ -571,6 +697,436 @@ def fetch_data(company_code: str, authorization: Optional[str] = Header(None)):
     except Exception as e:
         logging.error(f"Failed to fetch data for {company_code}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch data: {str(e)}")
+
+@app.get("/records/companies")
+def list_company_codes(
+    query: Optional[str] = None,
+    source_company_code: Optional[str] = None,
+    source_site_code: Optional[str] = None,
+    authorization: Optional[str] = Header(None),
+):
+    """List existing company/site combinations from PL_Master data."""
+    current_user = get_current_user(authorization)
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # Get only EXISTING company/site combinations from actual data
+        sql = """
+            SELECT DISTINCT CompanyCode, SiteCode
+            FROM [MLDataWarehouse].[dbo].[PL_Master]
+            WHERE CompanyCode IS NOT NULL AND LTRIM(RTRIM(CompanyCode)) <> ''
+            AND SiteCode IS NOT NULL AND LTRIM(RTRIM(SiteCode)) <> ''
+            ORDER BY CompanyCode, SiteCode
+        """
+
+        cursor.execute(sql)
+        all_rows = cursor.fetchall()
+        
+        company_sites = []
+        for row in all_rows:
+            cc = safe_val(row[0])
+            sc = safe_val(row[1])
+            if cc and sc:
+                company_sites.append({"company_code": cc, "site_code": sc})
+
+        # Apply search filter
+        cleaned_query = safe_val(query)
+        if cleaned_query:
+            company_sites = [
+                cs for cs in company_sites
+                if cleaned_query.upper() in cs["company_code"].upper() 
+                   or cleaned_query.upper() in cs["site_code"].upper()
+            ]
+
+        # Apply source exclusion filter
+        normalized_source = normalize_company_code(source_company_code)
+        if normalized_source and source_site_code:
+            normalized_sc = source_site_code.strip()
+            company_sites = [
+                cs for cs in company_sites
+                if not (cs["company_code"] == normalized_source and cs["site_code"] == normalized_sc)
+            ]
+        elif normalized_source:
+            company_sites = [cs for cs in company_sites if cs["company_code"] != normalized_source]
+        
+        conn.close()
+
+        return {
+            "status": "success",
+            "query": cleaned_query,
+            "source_company_code": normalized_source,
+            "source_site_code": source_site_code,
+            "count": len(company_sites),
+            "company_sites": company_sites,
+            "company_codes": company_sites,
+        }
+    except Exception as e:
+        logging.error(f"Failed to list company codes for {current_user['username']}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list company codes: {str(e)}")
+
+@app.post("/records/create-company-site")
+def create_company_site(
+    company_code: str = Query(...),
+    site_code: str = Query(...),
+    authorization: Optional[str] = Header(None),
+):
+    """Create a new company/site combination table by inserting a placeholder row."""
+    current_user = get_current_user(authorization)
+    username = current_user["username"]
+
+    try:
+        normalized_cc = normalize_company_code(company_code)
+        normalized_sc = site_code.strip().upper()
+
+        if not normalized_cc or not normalized_sc:
+            raise HTTPException(status_code=400, detail="Invalid company code or site code format")
+
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # Check if combination already exists
+        check_sql = """
+            SELECT COUNT(*) FROM [MLDataWarehouse].[dbo].[PL_Master]
+            WHERE CompanyCode = ? AND SiteCode = ?
+        """
+        cursor.execute(check_sql, (normalized_cc, normalized_sc))
+        count = cursor.fetchone()[0]
+
+        if count > 0:
+            conn.close()
+            raise HTTPException(status_code=400, detail=f"{normalized_cc}:{normalized_sc} already exists")
+
+        # Insert a placeholder row to create the table entry
+        unique_id = f"{normalized_cc}:{normalized_sc}:PLACEHOLDER:{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
+        insert_sql = """
+            INSERT INTO [MLDataWarehouse].[dbo].[PL_Master]
+            (UniqueID, GLCode, LineItem, CompanyCode, SiteCode, IsCOGS, IsSales, IsDiscount)
+            VALUES (?, ?, ?, ?, ?, 0, 0, 0)
+        """
+        cursor.execute(
+            insert_sql,
+            (unique_id, "PLACEHOLDER", "Placeholder", normalized_cc, normalized_sc),
+        )
+        conn.commit()
+        conn.close()
+
+        return {
+            "status": "success",
+            "message": f"Created new table for {normalized_cc}:{normalized_sc}",
+            "company_code": normalized_cc,
+            "site_code": normalized_sc,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Failed to create company/site for {username}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create company/site: {str(e)}")
+
+@app.post("/records/copy-changes")
+def copy_changes(request: CopyChangesRequest, authorization: Optional[str] = Header(None)):
+    """Copy latest saved source master to targets by fully replacing target snapshots for company/site combinations."""
+    current_user = get_current_user(authorization)
+    username = current_user["username"]
+
+    source_company_code = normalize_company_code(request.source_company_code)
+    if not source_company_code or not is_valid_company_code(source_company_code):
+        raise HTTPException(status_code=400, detail="Valid source_company_code is required (format: C+digits)")
+    
+    source_site_code = request.source_site_code.strip() if request.source_site_code else None
+    if not source_site_code:
+        raise HTTPException(status_code=400, detail="source_site_code is required")
+
+    deduped_targets: List[TargetCompanySite] = []
+    for target in request.targets:
+        normalized_cc = normalize_company_code(target.company_code)
+        normalized_sc = target.site_code.strip() if target.site_code else ""
+        if not normalized_cc or not normalized_sc:
+            continue
+        if normalized_cc == source_company_code and normalized_sc == source_site_code:
+            continue
+        if not is_valid_company_code(normalized_cc):
+            continue
+        if not any(t.company_code == normalized_cc and t.site_code == normalized_sc for t in deduped_targets):
+            deduped_targets.append(TargetCompanySite(company_code=normalized_cc, site_code=normalized_sc))
+
+    if not deduped_targets:
+        raise HTTPException(status_code=400, detail="At least one valid target company code and site code combination is required")
+
+    source_prefix = extract_company_prefix(source_company_code)
+    if source_prefix is None:
+        raise HTTPException(status_code=400, detail="Invalid source company code")
+
+    conn = None
+    targets_summary: List[Dict[str, Any]] = []
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+                SELECT UniqueID, GLCode, LineItem, CompanyCode, SiteCode, GrandParent, Parent,
+                       GrandParentCode, ParentCode, LineItemCode, IsAggregated, AggregatedFormula,
+                       PercentageFormula, ERPSoftware, SubNLCode, IsCOGS, IsSales, IsDiscount
+                FROM [MLDataWarehouse].[dbo].[PL_Master]
+                WHERE CompanyCode = ? AND SiteCode = ?
+            """,
+            (source_company_code, source_site_code),
+        )
+        source_rows = cursor.fetchall()
+        source_columns = [col[0] for col in cursor.description] if cursor.description else []
+
+        if not source_rows:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Source company {source_company_code} and site {source_site_code} has no saved master rows to copy",
+            )
+
+        for target in deduped_targets:
+            target_company_code = target.company_code
+            target_site_code = target.site_code
+            target_summary: Dict[str, Any] = {
+                "target_company_code": target_company_code,
+                "target_site_code": target_site_code,
+                "inserted": 0,
+                "deleted_existing": 0,
+                "skipped_invalid_ids": [],
+                "errors": [],
+                "source_row_count": len(source_rows),
+            }
+
+            target_prefix = extract_company_prefix(target_company_code)
+            if target_prefix is None:
+                target_summary["errors"].append(f"Invalid target company code: {target_company_code}")
+                targets_summary.append(target_summary)
+                continue
+
+            try:
+                prepared_rows: List[List[Any]] = []
+
+                for source_row in source_rows:
+                    row_data = dict(zip(source_columns, source_row))
+                    source_unique_id = safe_val(row_data.get("UniqueID"))
+                    remapped_unique_id = remap_unique_id(source_unique_id, source_company_code, target_company_code)
+
+                    if remapped_unique_id is None:
+                        reason = "remap_failed"
+                        logging.info(f"Skipping source row: UniqueID={source_unique_id} reason={reason} source_row={row_data}")
+                        target_summary["skipped_invalid_ids"].append(source_unique_id or "")
+                        continue
+
+                    gl_code = safe_val(row_data.get("GLCode"))
+                    line_item = safe_val(row_data.get("LineItem"))
+                    grandparent = safe_val(row_data.get("GrandParent"))
+                    parent = safe_val(row_data.get("Parent"))
+                    grandparent_code = safe_val(row_data.get("GrandParentCode"))
+                    parent_code = safe_val(row_data.get("ParentCode"))
+                    line_item_code = safe_val(row_data.get("LineItemCode"))
+                    is_aggregated = safe_int(row_data.get("IsAggregated"))
+                    agg_formula = safe_val(row_data.get("AggregatedFormula"))
+                    pct_formula = safe_val(row_data.get("PercentageFormula"))
+                    erp_software = safe_val(row_data.get("ERPSoftware"))
+                    sub_nl_code = safe_val(row_data.get("SubNLCode"))
+                    is_cogs = safe_int(row_data.get("IsCOGS"))
+                    is_sales = safe_int(row_data.get("IsSales"))
+                    is_discount = safe_int(row_data.get("IsDiscount"))
+
+                    if not all([
+                        remapped_unique_id,
+                        gl_code,
+                        line_item,
+                        target_company_code,
+                        target_site_code,
+                        is_cogs is not None,
+                        is_sales is not None,
+                        is_discount is not None,
+                    ]):
+                        reason = []
+                        if not gl_code:
+                            reason.append('missing_GLCode')
+                        if not line_item:
+                            reason.append('missing_LineItem')
+                        if is_cogs is None or is_sales is None or is_discount is None:
+                            reason.append('missing_boolean_flags')
+                        reason_str = ','.join(reason) if reason else 'invalid_required_fields'
+                        logging.info(f"Skipping source row: UniqueID={source_unique_id} reason={reason_str} source_row={row_data}")
+                        target_summary["errors"].append(
+                            f"Invalid required fields for source UniqueID {source_unique_id or 'UNKNOWN'}: {reason_str}"
+                        )
+                        continue
+
+                    prepared_rows.append([
+                        remapped_unique_id,
+                        gl_code,
+                        line_item,
+                        target_company_code,
+                        target_site_code,
+                        grandparent,
+                        parent,
+                        grandparent_code,
+                        parent_code,
+                        line_item_code,
+                        is_aggregated,
+                        agg_formula,
+                        pct_formula,
+                        erp_software,
+                        sub_nl_code,
+                        is_cogs,
+                        is_sales,
+                        is_discount,
+                    ])
+
+                # If there are no valid rows to insert, skip this target.
+                if not prepared_rows:
+                    logging.info(f"No valid prepared rows for target {target_company_code}/{target_site_code}. source_rows={len(source_rows)} skipped={len(target_summary['skipped_invalid_ids'])} errors={len(target_summary['errors'])}")
+                    targets_summary.append(target_summary)
+                    continue
+
+                # Log prepared rows summary and sample remapped UniqueIDs
+                sample_uids = [r[0] for r in prepared_rows[:20]]
+                logging.info(f"Prepared {len(prepared_rows)} rows for target {target_company_code}/{target_site_code}. sample_uids={sample_uids}")
+
+                # Conflict preflight: check whether any remapped UniqueIDs already exist in the target
+                remapped_ids = {r[0] for r in prepared_rows}
+                cursor.execute(
+                    "SELECT UniqueID FROM [MLDataWarehouse].[dbo].[PL_Master] WHERE CompanyCode = ? AND SiteCode = ?",
+                    (target_company_code, target_site_code),
+                )
+                existing_uids = {safe_val(r[0]) for r in cursor.fetchall()}
+
+                conflicts = sorted(list(remapped_ids & existing_uids))
+                if conflicts and not request.confirm_overwrite:
+                    logging.info(f"Conflicts detected for target {target_company_code}/{target_site_code}: {conflicts[:20]}")
+                    # Return conflict details for caller to confirm overwrite
+                    target_summary["conflicts"] = conflicts
+                    targets_summary.append(target_summary)
+
+                    # Build a detailed response describing conflicts across targets
+                    conflict_response = {
+                        "status": "conflict",
+                        "message": "Conflicting UniqueIDs detected for target(s). Call again with confirm_overwrite=true to clear and proceed.",
+                        "targets": [t for t in targets_summary],
+                    }
+                    raise HTTPException(status_code=409, detail=conflict_response)
+
+                # If confirm_overwrite is true, delete only conflicting rows first
+                if conflicts and request.confirm_overwrite:
+                    # Delete only the conflicting UniqueIDs for this target
+                    # Build parameterized query in chunks to avoid excessively long SQL
+                    params = []
+                    placeholders = []
+                    for uid in conflicts:
+                        params.append(uid)
+                        placeholders.append("?")
+                    delete_sql = f"DELETE FROM [MLDataWarehouse].[dbo].[PL_Master] WHERE CompanyCode = ? AND SiteCode = ? AND UniqueID IN ({', '.join(placeholders)})"
+                    cursor.execute(delete_sql, (target_company_code, target_site_code, *params))
+                    logging.info(f"Deleted {len(conflicts)} conflicting UniqueIDs for {target_company_code}/{target_site_code}")
+
+                cursor.execute(
+                    "SELECT COUNT(*) FROM [MLDataWarehouse].[dbo].[PL_Master] WHERE CompanyCode = ? AND SiteCode = ?",
+                    (target_company_code, target_site_code),
+                )
+                existing_count = cursor.fetchone()[0] or 0
+                target_summary["deleted_existing"] = existing_count
+
+                cursor.execute(
+                    "DELETE FROM [MLDataWarehouse].[dbo].[PL_Master] WHERE CompanyCode = ? AND SiteCode = ?",
+                    (target_company_code, target_site_code),
+                )
+
+                cursor.executemany(
+                    """
+                        INSERT INTO [MLDataWarehouse].[dbo].[PL_Master]
+                        (UniqueID, GLCode, LineItem, CompanyCode, SiteCode, GrandParent, Parent,
+                         GrandParentCode, ParentCode, LineItemCode, IsAggregated, AggregatedFormula,
+                         PercentageFormula, ERPSoftware, SubNLCode, IsCOGS, IsSales, IsDiscount)
+                        VALUES
+                        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    prepared_rows,
+                )
+
+                target_summary["inserted"] = len(prepared_rows)
+
+                conn.commit()
+
+                # Log post-insert sample from target to validate content
+                try:
+                    cursor.execute(
+                        "SELECT TOP 10 UniqueID, GLCode, LineItem, CompanyCode, SiteCode FROM [MLDataWarehouse].[dbo].[PL_Master] WHERE CompanyCode = ? AND SiteCode = ? ORDER BY UniqueID",
+                        (target_company_code, target_site_code),
+                    )
+                    post_rows = cursor.fetchall()
+                    logging.info(f"Post-insert sample for {target_company_code}/{target_site_code}: {post_rows[:10]}")
+                except Exception as e:
+                    logging.error(f"Failed to fetch post-insert sample for {target_company_code}/{target_site_code}: {e}")
+
+                log_change(
+                    username=username,
+                    company_code=target_company_code,
+                    record_id=f"{target_company_code}\\{target_site_code}",
+                    change_type="COPY_OVERWRITE_DONE",
+                    field_changes=[
+                        {"field": "source_company_code", "old": None, "new": source_company_code},
+                        {"field": "source_site_code", "old": None, "new": source_site_code},
+                        {"field": "target_site_code", "old": None, "new": target_site_code},
+                        {"field": "deleted_existing", "old": str(existing_count), "new": "0"},
+                        {"field": "inserted", "old": "0", "new": str(len(prepared_rows))},
+                    ],
+                )
+                db_log_audit(
+                    username,
+                    "COPY_OVERWRITE",
+                    f"{target_company_code}\\{target_site_code}",
+                    f"{target_company_code}\\{target_site_code}",
+                    str(existing_count),
+                    str(len(prepared_rows)),
+                )
+
+            except Exception as target_error:
+                conn.rollback()
+                target_summary["errors"].append(str(target_error))
+                logging.error(
+                    f"Copy changes failed for source {source_company_code}/{source_site_code} -> target {target_company_code}/{target_site_code}: {target_error}"
+                )
+
+            targets_summary.append(target_summary)
+
+        totals = {
+            "inserted": sum(target["inserted"] for target in targets_summary),
+            "deleted_existing": sum(target["deleted_existing"] for target in targets_summary),
+            "skipped_invalid_ids": sum(len(target["skipped_invalid_ids"]) for target in targets_summary),
+            "errors": sum(len(target["errors"]) for target in targets_summary),
+            "replaced_targets": sum(1 for target in targets_summary if len(target["errors"]) == 0),
+        }
+
+        status_text = "success" if totals["errors"] == 0 else "partial_success"
+
+        logging.info(
+            f"Copy changes by {username}: source={source_company_code}/{source_site_code}, targets={len(deduped_targets)}, "
+            f"inserted={totals['inserted']}, deleted_existing={totals['deleted_existing']}, "
+            f"replaced_targets={totals['replaced_targets']}"
+        )
+
+        return {
+            "status": status_text,
+            "source_company_code": source_company_code,
+            "source_site_code": source_site_code,
+            "total_targets": len(deduped_targets),
+            "totals": totals,
+            "targets": targets_summary,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Copy changes failed for source {source_company_code}/{source_site_code}: {e}")
+        raise HTTPException(status_code=500, detail=f"Copy changes failed: {str(e)}")
+    finally:
+        if conn is not None:
+            conn.close()
 
 @app.post("/records/batch-sync")
 def upsert_data(request: UpsertRequest, authorization: Optional[str] = Header(None)):

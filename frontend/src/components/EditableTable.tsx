@@ -27,20 +27,59 @@ export function EditableTable({
   const [draggedRowIndex, setDraggedRowIndex] = useState<number | null>(null);
   const [dropTargetIndex, setDropTargetIndex] = useState<number | null>(null);
   const tableRef = useRef<HTMLDivElement>(null);
+  const cellRefs = useRef<Record<string, HTMLInputElement | HTMLSelectElement | null>>({});
+
+  const focusCellElement = useCallback((rowId: string, col: string) => {
+    const key = `${rowId}:${col}`;
+    const element = cellRefs.current[key];
+    if (element) {
+      element.focus();
+      if ('select' in element && typeof element.select === 'function') {
+        element.select();
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (focusCell) {
+      focusCellElement(focusCell.rowId, focusCell.col);
+    }
+  }, [focusCell, focusCellElement]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent, rowId: string, col: string, rowIndex: number, colIndex: number) => {
+      const moveFocus = (targetRowIndex: number, targetColIndex: number) => {
+        const nextRow = rows[targetRowIndex];
+        const nextCol = COLUMNS[targetColIndex];
+        if (nextRow && nextCol) {
+          setFocusCell({ rowId: nextRow._rowId!, col: nextCol });
+        }
+      };
+
       if (e.key === 'Tab') {
         e.preventDefault();
-        const nextCol = colIndex + 1 < COLUMNS.length ? COLUMNS[colIndex + 1] : null;
-        const nextRow = rowIndex + 1 < rows.length ? rows[rowIndex + 1] : null;
-        if (nextCol) setFocusCell({ rowId, col: nextCol });
-        else if (nextRow) setFocusCell({ rowId: nextRow._rowId!, col: COLUMNS[0] });
+        if (e.shiftKey) {
+          if (colIndex > 0) {
+            moveFocus(rowIndex, colIndex - 1);
+          } else if (rowIndex > 0) {
+            moveFocus(rowIndex - 1, COLUMNS.length - 1);
+          }
+          return;
+        }
+
+        if (colIndex + 1 < COLUMNS.length) {
+          moveFocus(rowIndex, colIndex + 1);
+        } else if (rowIndex + 1 < rows.length) {
+          moveFocus(rowIndex + 1, 0);
+        }
+        return;
       }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
-        const nextRow = rows[rowIndex + 1];
-        if (nextRow) setFocusCell({ rowId: nextRow._rowId!, col });
+        if (rowIndex + 1 < rows.length) {
+          moveFocus(rowIndex + 1, colIndex);
+        }
+        return;
       }
     },
     [rows]
@@ -237,6 +276,11 @@ export function EditableTable({
                       <select
                         value={displayVal}
                         onChange={e => onUpdateCell(row._rowId!, col as keyof PLMasterRow, e.target.value)}
+                        ref={(element) => {
+                          cellRefs.current[`${row._rowId}:${col}`] = element;
+                        }}
+                        onFocus={() => setFocusCell({ rowId: row._rowId!, col })}
+                        onKeyDown={e => handleKeyDown(e, row._rowId!, col, rowIndex, colIndex)}
                         className={cn(
                           'w-full h-7 bg-transparent px-2 text-xs font-mono outline-none cursor-pointer',
                           'hover:bg-secondary/40 focus:bg-secondary focus:ring-1 focus:ring-primary/50',
@@ -249,7 +293,9 @@ export function EditableTable({
                       </select>
                     ) : (
                       <input
-                        autoFocus={isFocused}
+                        ref={(element) => {
+                          cellRefs.current[`${row._rowId}:${col}`] = element;
+                        }}
                         value={displayVal}
                         onChange={e => onUpdateCell(row._rowId!, col as keyof PLMasterRow, e.target.value)}
                         onFocus={() => setFocusCell({ rowId: row._rowId!, col })}

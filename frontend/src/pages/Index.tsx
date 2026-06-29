@@ -1,9 +1,12 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import {
   fetchCompanyData,
   saveData,
   deleteAllRecords,
+  copyChangesToCompanies,
+  fetchCompanySites,
   PLMasterRow,
+  CompanySiteOption,
 } from '@/lib/plMasterTypes';
 import { useTableEditor } from '@/hooks/useTableEditor';
 import { EditableTable } from '@/components/EditableTable';
@@ -12,10 +15,11 @@ import { SearchBar } from '@/components/SearchFilterPanel';
 import { ToastNotification } from '@/components/ToastNotification';
 import { ColumnInfoPanel } from '@/components/ColumnInfoPanel';
 import { HistoryDialog } from '@/components/HistoryDialog';
+import { CopyChangesDialog } from '@/components/CopyChangesDialog';
 import { useAuth } from '@/context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import {
-  Plus, Save, RotateCcw, Download, Database, ChevronRight,
+  Plus, Save, RotateCcw, Download, Database, ChevronRight, Copy,
   Layers, TrendingUp, FileSpreadsheet, AlertTriangle, History, LogOut, Settings, Trash2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -71,6 +75,13 @@ function PLEditor({
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [showValidation, setShowValidation] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [showCopyDialog, setShowCopyDialog] = useState(false);
+  const [isCopying, setIsCopying] = useState(false);
+  const [conflictModalOpen, setConflictModalOpen] = useState(false);
+  const [conflictDetails, setConflictDetails] = useState<any[]>([]);
+  const [companySites, setCompanySites] = useState<CompanySiteOption[]>([]);
+  const [isLoadingCompanySites, setIsLoadingCompanySites] = useState(false);
+  const [companySitesError, setCompanySitesError] = useState<string | null>(null);
   const [showDeleteAllDialog, setShowDeleteAllDialog] = useState(false);
   const [deleteConfirmChecked, setDeleteConfirmChecked] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -167,6 +178,143 @@ function PLEditor({
   };
 
   const stats = getStats();
+  const hasUnsavedChanges = stats.newRows > 0 || stats.modifiedRows > 0 || stats.deletedRows > 0;
+  const unsavedChangeSummary = `${stats.newRows} new, ${stats.modifiedRows} modified, ${stats.deletedRows} pending delete`;
+
+  useEffect(() => {
+    if (!token) {
+      setCompanySites([]);
+      setCompanySitesError('Authentication token missing. Please log in again.');
+      setIsLoadingCompanySites(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadCompanySites = async () => {
+      setIsLoadingCompanySites(true);
+      setCompanySitesError(null);
+
+      try {
+        const result = await fetchCompanySites(token);
+        if (!cancelled) {
+          setCompanySites(result);
+        }
+      } catch (error: any) {
+        if (!cancelled) {
+          setCompanySitesError(error.message || 'Failed to load company sites');
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoadingCompanySites(false);
+        }
+      }
+    };
+
+    loadCompanySites();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  const handleRefreshCompanySites = async () => {
+    if (!token) return;
+    
+    setIsLoadingCompanySites(true);
+    try {
+      const result = await fetchCompanySites(token);
+      setCompanySites(result);
+    } catch (error: any) {
+      addToast('error', 'Failed to refresh sites', error.message);
+    } finally {
+      setIsLoadingCompanySites(false);
+    }
+  };
+
+  // Extract distinct source site codes from rows
+  const sourceSiteCodes = useMemo(() => {
+    const set = new Set<string>();
+    rows.forEach(r => {
+      const site = (r as any).SiteCode;
+      if (site) set.add(String(site).trim());
+    });
+    return Array.from(set);
+  }, [rows]);
+
+  const handleCopyChanges = async (sourceSiteCode: string, targetCompanySites: CompanySiteOption[], confirmOverwrite = false) => {
+    if (!token) {
+      addToast('error', 'Copy failed', 'Authentication token missing. Please log in again.');
+      return;
+    }
+
+    setIsCopying(true);
+    try {
+      if (hasUnsavedChanges) {
+        addToast('info', 'Using saved source data', 'Save changes first if you want unsaved edits included in copy.');
+      }
+
+      const result = await copyChangesToCompanies(companyCode, sourceSiteCode, targetCompanySites, token, { confirm_overwrite: confirmOverwrite });
+
+      const totals = result.totals;
+      const summary = `Targets: ${result.total_targets} · Replaced: ${totals.replaced_targets} · Inserted: ${totals.inserted} · Removed old rows: ${totals.deleted_existing}`;
+
+      if (result.status === 'partial_success' || totals.errors > 0) {
+        addToast('error', 'Copy completed with errors', `${summary} · Errors: ${totals.errors}`);
+      } else {
+        addToast('success', 'Copy completed', summary);
+      }
+
+      if (totals.skipped_invalid_ids > 0) {
+        addToast(
+          'info',
+          'Some rows were skipped',
+          `Invalid source UniqueIDs: ${totals.skipped_invalid_ids}`
+        );
+      }
+
+      const failedTargets = result.targets.filter(target => target.errors.length > 0);
+      if (failedTargets.length > 0) {
+        addToast(
+          'error',
+          'Target errors',
+          failedTargets
+            .slice(0, 2)
+            .map(target => `${target.target_company_code}: ${target.errors[0]}`)
+            .join('\n')
+        );
+      }
+
+      setShowCopyDialog(false);
+    } catch (err: any) {
+      // Handle conflict response from backend (409) which includes detail with targets/conflicts
+      if (err?.status === 409 && err.detail && Array.isArray(err.detail.targets || err.detail.targets)) {
+        const targets = err.detail.targets || err.detail;
+        // Debug log conflict details
+        // eslint-disable-next-line no-console
+        console.warn('Copy conflicts detected', targets);
+        setConflictDetails(targets);
+        setConflictModalOpen(true);
+      } else {
+        addToast('error', 'Copy failed', err.message || JSON.stringify(err.detail || err));
+      }
+    } finally {
+      setIsCopying(false);
+    }
+  };
+
+  const confirmAndOverwrite = async () => {
+    setConflictModalOpen(false);
+    if (conflictDetails.length === 0) return;
+    // Build targets list from conflict details
+    const targets: CompanySiteOption[] = conflictDetails.map(t => ({ company_code: t.target_company_code, site_code: t.target_site_code }));
+    // Debug log: user confirmed overwrite for these targets
+    // eslint-disable-next-line no-console
+    console.info('User confirmed overwrite for targets', targets);
+    // We call handleCopyChanges again with confirmOverwrite = true
+    await handleCopyChanges(selectedSourceSiteCode, targets, true);
+    setConflictDetails([]);
+  };
 
   return (
     <div className="flex flex-col h-full gap-0">
@@ -261,6 +409,23 @@ function PLEditor({
               </>
             )}
           </button>
+
+          <button
+            onClick={() => setShowCopyDialog(true)}
+            disabled={isCopying}
+            className={cn(
+              'flex items-center gap-1.5 px-4 py-1.5 rounded-md text-xs font-bold',
+              'bg-secondary text-secondary-foreground hover:bg-secondary/70 transition-colors border border-border',
+              'disabled:opacity-60 disabled:cursor-not-allowed'
+            )}
+          >
+            {isCopying ? (
+              <span className="inline-block w-3 h-3 border-2 border-foreground/30 border-t-foreground rounded-full animate-spin" />
+            ) : (
+              <Copy size={13} />
+            )}
+            Copy Changes
+          </button>
         </div>
       </div>
 
@@ -326,6 +491,52 @@ function PLEditor({
         companyCode={companyCode}
         showAllHistory={canViewHistory}
       />
+
+      <CopyChangesDialog
+        isOpen={showCopyDialog}
+        onClose={() => setShowCopyDialog(false)}
+        sourceCompanyCode={companyCode}
+        sourceSiteCodes={sourceSiteCodes}
+        companySites={companySites}
+        isLoadingCompanySites={isLoadingCompanySites}
+        companySitesError={companySitesError}
+        hasUnsavedChanges={hasUnsavedChanges}
+        unsavedChangeSummary={unsavedChangeSummary}
+        isCopying={isCopying}
+        onCopy={handleCopyChanges}
+        onRefresh={handleRefreshCompanySites}
+        token={token}
+      />
+
+      {/* Conflict confirmation dialog */}
+      <AlertDialog open={conflictModalOpen} onOpenChange={(open) => setConflictModalOpen(open)}>
+        <AlertDialogContent className="max-w-xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Conflicting UniqueIDs detected</AlertDialogTitle>
+            <AlertDialogDescription>
+              Some remapped UniqueIDs already exist in the target company/site. You can clear just the conflicting rows and continue.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          <div className="px-4 py-2">
+            {conflictDetails.map((t, idx) => (
+              <div key={idx} className="mb-3">
+                <div className="font-mono font-semibold mb-1">{t.target_company_code} - {t.target_site_code}</div>
+                <div className="text-sm max-h-40 overflow-auto border border-border rounded p-2 bg-background">
+                  {(t.conflicts || []).slice(0, 50).map((u: string, i: number) => (
+                    <div key={i} className="text-xs font-mono">{u}</div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmAndOverwrite}>Clear conflicts and continue</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Delete All Dialog */}
       <AlertDialog 
